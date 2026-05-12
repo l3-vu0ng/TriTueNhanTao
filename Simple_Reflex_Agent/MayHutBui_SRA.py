@@ -1,6 +1,5 @@
 import random
 
-
 def P_moves(x, y):
     moves = []
     if x < 3: moves.append("D")
@@ -12,6 +11,7 @@ def P_moves(x, y):
 def RulesMatch(E, x, y):
     state = E[x][y]
     if state == 1:
+        print("Vị trí hiện tại bị bẩn, thực hiện hành động dọn dẹp")
         E[x][y] = 0
         moves = P_moves(x, y)
         action = random.choice(moves)
@@ -26,18 +26,22 @@ def RulesMatch(E, x, y):
 
     return action, x, y
 
+## Ma trận môi trường 4x4, 1 là bẩn, 0 là sạch
 E = [[0,0,1,0],
      [1,1,0,1],
      [0,1,0,0],
      [1,0,0,1]]
 
+## Khởi tạo vị trí ban đầu của agent
 curr_x, curr_y = 1, 1
 
+## Chạy vòng lặp cho 100 bước
 for i in range(100):
-    print(f"Bước {i+1}: Vị trí hiện tại ({curr_x}, {curr_y}), trạng thái: {E[curr_x][curr_y]}")
+    print("Lần thứ", i+1)
     action, curr_x, curr_y = RulesMatch(E, curr_x, curr_y)
     print(E)
-    dirty_count = sum(row.count(1) for row in E)
-    if dirty_count == 0:
-        print(f"Hoàn thành dọn dẹp tại bước thứ {i+1}")
+    print("Hành động tiếp theo:", action)
+    count = sum(row.count(1) for row in E)
+    if count == 0:
+        print("Môi trường đã sạch, dừng chương trình.")
         break
