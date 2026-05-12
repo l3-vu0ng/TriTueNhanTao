@@ -37,7 +37,7 @@ curr_x, curr_y = 1, 1
 
 ## Chạy vòng lặp cho 100 bước
 for i in range(100):
-    print("Lần thứ", i+1)
+    print(f"\n--- Lần thứ {i+1} ---")
     action, curr_x, curr_y = RulesMatch(E, curr_x, curr_y)
     print(E)
     print("Hành động tiếp theo:", action)
