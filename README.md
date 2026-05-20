@@ -7,7 +7,7 @@ description:
 # 👋 Xin chào, mình là Võ Lê Vương
 
 <!-- Banner hoặc ảnh đại diện -->
-<!-- ![Banner](link-to-banner-image) -->
+<!-- ![Banner](./assets/banner.png) -->
 
 ### 🎓 Sinh viên ngành Công nghệ Thông tin
 

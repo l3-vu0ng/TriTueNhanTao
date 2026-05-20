@@ -36,12 +36,13 @@ TILE_CUR    = '#0f3460'
 #  DATA STRUCTURES
 # ══════════════════════════════════════════════════
 class NodeInfo:
-    def __init__(self, state, action=None, depth=0, parent_label=None, label='?'):
+    def __init__(self, state, action=None, depth=0, parent_label=None, label='?', parent=None):
         self.state        = state
         self.action       = action
         self.depth        = depth
         self.parent_label = parent_label
         self.label        = label
+        self.parent       = parent
 
 
 class BFSStep:
@@ -81,8 +82,9 @@ def bfs_full_trace(initial, goal):
     goal_t  = tuple(tuple(r) for r in goal)
     label_i = [0]
 
-    def make_node(state, action=None, depth=0, parent_label=None):
-        n = NodeInfo(state, action, depth, parent_label, LABELS[label_i[0]])
+    def make_node(state, action=None, depth=0, parent_node=None):
+        parent_label = parent_node.label if parent_node else None
+        n = NodeInfo(state, action, depth, parent_label, LABELS[label_i[0]], parent=parent_node)
         label_i[0] += 1
         return n
 
@@ -128,7 +130,7 @@ def bfs_full_trace(initial, goal):
             if child_state in explored_set or child_state in frontier_map:
                 continue
 
-            child = make_node(child_state, dir_name, node.depth + 1, node.label)
+            child = make_node(child_state, dir_name, node.depth + 1, node)
 
             # GOAL-TEST before inserting (per pseudocode)
             if child_state == goal_t:
@@ -388,15 +390,60 @@ class App:
         tk.Button(ctrl, text='⏭', command=self._go_last,
                   bg='#21262d', fg=WHITE, **bs).grid(row=0, column=4, padx=3)
 
+        tk.Button(ctrl, text='🛣 Show Path', command=self._show_path,
+                  bg=PURPLE, fg='black', **bs).grid(row=0, column=5, padx=3)
+
         tk.Frame(ctrl, bg=BORDER, width=1, height=28).grid(
-            row=0, column=5, padx=10)
+            row=0, column=6, padx=10)
 
         tk.Label(ctrl, text='Tốc độ:', bg=PANEL, fg=GRAY,
-                 font=('Segoe UI', 9)).grid(row=0, column=6, padx=(0, 4))
+                 font=('Segoe UI', 9)).grid(row=0, column=7, padx=(0, 4))
         tk.Scale(ctrl, from_=100, to=1500, orient='horizontal',
                  variable=self.speed, bg=PANEL, fg=WHITE,
                  troughcolor='#21262d', highlightthickness=0,
-                 length=150, showvalue=False).grid(row=0, column=7, padx=3)
+                 length=150, showvalue=False).grid(row=0, column=8, padx=3)
+
+    def _show_path(self):
+        import tkinter.messagebox
+        found_step = next((s for s in self.steps if s.phase == 'found'), None)
+        if not found_step or not found_step.current_node:
+            tkinter.messagebox.showinfo('Đường đi', 'Chưa tìm thấy Goal để hiển thị đường đi.')
+            return
+            
+        path = []
+        curr = found_step.current_node
+        while curr:
+            path.append(curr)
+            curr = getattr(curr, 'parent', None)
+        path.reverse()
+        
+        top = tk.Toplevel(self.root)
+        top.title(f"Đường đi tới Goal ({len(path)-1} bước)")
+        top.geometry("800x250")
+        top.configure(bg=BG)
+        
+        canvas = tk.Canvas(top, bg=BG, highlightthickness=0)
+        scrollbar = tk.Scrollbar(top, orient="horizontal", command=canvas.xview)
+        scrollable_frame = tk.Frame(canvas, bg=BG)
+        
+        scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(xscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="top", fill="both", expand=True, padx=10, pady=10)
+        scrollbar.pack(side="bottom", fill="x")
+        
+        for i, node in enumerate(path):
+            frame = tk.Frame(scrollable_frame, bg=PANEL, highlightthickness=1, highlightbackground=BORDER)
+            frame.pack(side="left", padx=10, pady=10, fill="y")
+            
+            lbl_text = "Start" if i == 0 else f"Step {i}: {ARROW.get(node.action, '')}"
+            tk.Label(frame, text=lbl_text, bg=PANEL, fg=WHITE, font=('Segoe UI', 10, 'bold')).pack(pady=5)
+            
+            c = tk.Canvas(frame, width=80, height=80, bg=PANEL, highlightthickness=0)
+            c.pack(padx=10, pady=10)
+            draw_board(c, 10, 10, node.state, cell=20, is_goal_state=(i == len(path)-1))
+            tk.Label(frame, text=f"[{node.label}]", bg=PANEL, fg=ACCENT, font=('Segoe UI', 9)).pack(pady=(0, 5))
 
     # ─── Render ───────────────────────────────────
     def _render(self, idx):
