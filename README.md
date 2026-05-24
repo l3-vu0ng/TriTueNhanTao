@@ -62,7 +62,7 @@ description:
 
 | # | Tên dự án | Mô tả | Công nghệ | Link |
 |---|-----------|--------|------------|------|
-| 1 | 🧠 **Trí Tuệ Nhân Tạo** | Triển khai các thuật toán AI: BFS, DFS, Agent Models | Python, Pygame | [Xem tại đây](https://github.com/l3-vu0ng/TriTueNhanTao) |
+| 1 | 🧠 **Trí Tuệ Nhân Tạo** | Triển khai các thuật toán AI: BFS, DFS, IDS, UCS (Giao diện trực quan thống nhất) | Python, Tkinter | [Xem tại đây](https://github.com/l3-vu0ng/TriTueNhanTao) |
 | 2 | 🦽 **Smart Wheelchair** | Ứng dụng điều khiển xe lăn thông minh qua IoT | Flutter, ESP32, MQTT | [Xem tại đây](https://github.com/l3-vu0ng/SmartWheelchair) |
 
 ---

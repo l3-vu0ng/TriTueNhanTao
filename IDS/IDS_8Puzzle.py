@@ -116,7 +116,7 @@ def ids_full_trace(initial, goal):
                 return steps, explored_master
                 
             # Check depth limit (Cutoff)
-            if node.depth > limit:
+            if node.depth >= limit:
                 dls_result = 'cutoff'
                 steps.append(IDSStep('cutoff', node, list(frontier_stack), len(explored_master), set(), f'[{node.label}] vượt quá limit ({limit}) — Cutoff!', limit))
                 continue
