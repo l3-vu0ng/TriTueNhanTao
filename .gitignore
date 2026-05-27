@@ -4,3 +4,5 @@ __pycache__/
 
 # Docs
 docs/
+
+.gitignore
