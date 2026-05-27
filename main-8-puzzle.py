@@ -1,12 +1,13 @@
+# ══════════════════════════════════════════════════
+# 1. CẤU HÌNH & HẰNG SỐ (CONFIG & CONSTANTS)
+# ══════════════════════════════════════════════════
+
 import tkinter as tk
 from tkinter import ttk, messagebox
 from collections import deque
 import heapq
 import itertools
 
-# ══════════════════════════════════════════════════
-#  CONFIG & CONSTANTS
-# ══════════════════════════════════════════════════
 INITIAL_STATE = ((2, 8, 3), (1, 6, 4), (7, 0, 5))
 GOAL_STATE = ((1, 2, 3), (8, 0, 4), (7, 6, 5))
 MAX_IDS_DEPTH = 31
@@ -15,13 +16,6 @@ DFS_DEPTH_LIMIT = 31
 MOVE_DIRS = [('U', -1, 0), ('D', 1, 0), ('L', 0, -1), ('R', 0, 1)]
 ARROW_MAP = {'U': '↑ U', 'D': '↓ D', 'L': '← L', 'R': '→ R'}
 LABELS_LIST = list('ABCDEFGHIJKLMNOPQRSTUVWXYZ') + [f'{c}{i}' for i in range(10) for c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ']
-
-def generateLabel(idx: int) -> str:
-    """Generates a sequential label (A-Z, A0-Z0, etc.) for a node."""
-    if idx < 26:
-        return chr(65 + idx)
-    idx -= 26
-    return chr(65 + idx % 26) + str(idx // 26)
 
 # Light Theme Colors
 BG = '#ffffff'
@@ -45,11 +39,94 @@ TILE_EXP = '#eaeef2'
 CELL_SIZE = 20
 
 # ══════════════════════════════════════════════════
-#  DATA STRUCTURES
+# 2. HÀM PHỤ TRỢ & TIỆN ÍCH (HELPER FUNCTIONS & UTILS)
 # ══════════════════════════════════════════════════
+
+def generateLabel(idx: int) -> str:
+    """Generates a sequential label (A-Z, A0-Z0, etc.) for a node."""
+    if idx < 26:
+        return chr(65 + idx)
+    idx -= 26
+    return chr(65 + idx % 26) + str(idx // 26)
+
+def drawBoard(canvas, x, y, state, cell=CELL_SIZE, highlight=None, newCells=None, isGoalState=False):
+    """Draws a 3x3 puzzle board on the canvas."""
+    isGhost = (highlight == 'ghost')
+    for r in range(3):
+        for c in range(3):
+            val = state[r][c]
+            cx = x + c * cell
+            cy = y + r * cell
+            
+            if isGhost:
+                bg = TILE_BLANK if val == 0 else '#eaeef2'
+            elif val == 0:
+                bg = TILE_BLANK
+            elif isGoalState:
+                bg = TILE_GOAL_C
+            elif highlight == 'explored':
+                bg = TILE_EXP
+            elif newCells and (r, c) in newCells:
+                bg = TILE_NEW
+            else:
+                bg = TILE_BG
+
+            canvas.create_rectangle(cx, cy, cx + cell - 1, cy + cell - 1, fill=bg, outline=BORDER, width=1)
+            
+            if val != 0:
+                fgColor = '#8c959f' if isGhost or highlight == 'explored' else WHITE
+                if isGhost or highlight == 'explored':
+                    fgColor = BLACK
+                canvas.create_text(cx + cell // 2, cy + cell // 2, text=str(val), fill=fgColor, font=('Segoe UI', 7, 'bold'))
+
+def calculateManhattanDistance(state, goalState) -> int:
+    """Calculates the Manhattan distance between two states."""
+    dist = 0
+    goalPos = {}
+    for r in range(3):
+        for c in range(3):
+            val = goalState[r][c]
+            if val != 0:
+                goalPos[val] = (r, c)
+                
+    for r in range(3):
+        for c in range(3):
+            val = state[r][c]
+            if val != 0:
+                gr, gc = goalPos[val]
+                dist += abs(r - gr) + abs(c - gc)
+    return dist
+
+def calculateMisplacedTiles(state, goalState) -> int:
+    """Calculates the number of misplaced tiles (excluding the blank tile)."""
+    count = 0
+    for r in range(3):
+        for c in range(3):
+            if state[r][c] != 0 and state[r][c] != goalState[r][c]:
+                count += 1
+    return count
+
+def calculateInversions(state) -> int:
+    """Calculates the number of inversions in the state."""
+    lst = []
+    for r in range(3):
+        for c in range(3):
+            if state[r][c] != 0:
+                lst.append(state[r][c])
+    inversions = 0
+    for i in range(len(lst)):
+        for j in range(i + 1, len(lst)):
+            if lst[i] > lst[j]:
+                inversions += 1
+    return inversions
+
+# ══════════════════════════════════════════════════
+# 3. CẤU TRÚC DỮ LIỆU (DATA STRUCTURES)
+# ══════════════════════════════════════════════════
+
 class NodeInfo:
     """Represents a node in the search tree."""
-    def __init__(self, state, action=None, depth=0, cost=0, parentLabel=None, label='?', parent=None):
+    def __init__(self, state, action=None, depth=0, cost=0, parentLabel=None, label='?', parent=None, g=0, h=0):
         self.state = state
         self.action = action
         self.depth = depth
@@ -57,6 +134,8 @@ class NodeInfo:
         self.parentLabel = parentLabel
         self.label = label
         self.parent = parent
+        self.g = g
+        self.h = h
 
 class StepInfo:
     """Represents a snapshot of the algorithm at a single step."""
@@ -70,9 +149,6 @@ class StepInfo:
         self.limit = limit              # Used by IDS
         self.exploredCount = exploredCount # Used by DFS/IDS to refer to master explored list
 
-# ══════════════════════════════════════════════════
-#  PUZZLE HELPERS
-# ══════════════════════════════════════════════════
 def findZero(state) -> tuple:
     """Finds the coordinates of the blank tile (0)."""
     for r in range(3):
@@ -102,8 +178,9 @@ def countCorrectPositions(state, goalState) -> int:
     return count
 
 # ══════════════════════════════════════════════════
-#  SEARCH ALGORITHMS
+# 4. THUẬT TOÁN TÌM KIẾM CỐT LÕI (CORE SEARCH ALGORITHMS)
 # ══════════════════════════════════════════════════
+
 class SearchEngine:
     """Encapsulates the 4 search algorithms."""
     
@@ -398,43 +475,150 @@ class SearchEngine:
         steps.append(StepInfo('failure', None, [], list(exploredList), set(), descFail))
         return steps, exploredList
 
+    @staticmethod
+    def runGreedySearch(initial, goal):
+        goalTuple = tuple(tuple(r) for r in goal)
+        labelIndex = [0]
+        
+        def createNode(state, action=None, depth=0, parentNode=None):
+            parentLabel = parentNode.label if parentNode else None
+            n = NodeInfo(state, action, depth, 0, parentLabel, generateLabel(labelIndex[0]), parent=parentNode)
+            n.h = calculateManhattanDistance(state, goalTuple)
+            labelIndex[0] += 1
+            return n
 
-# ══════════════════════════════════════════════════
-#  DRAWING HELPERS
-# ══════════════════════════════════════════════════
-def drawBoard(canvas, x, y, state, cell=CELL_SIZE, highlight=None, newCells=None, isGoalState=False):
-    """Draws a 3x3 puzzle board on the canvas."""
-    isGhost = (highlight == 'ghost')
-    for r in range(3):
-        for c in range(3):
-            val = state[r][c]
-            cx = x + c * cell
-            cy = y + r * cell
+        steps = []
+        start = createNode(initial)
+        
+        frontier = [start]
+        reached = {}
+        
+        descInit = f"Khởi tạo Greedy-Search:\n👉 FRONTIER = {{ [{start.label}] }}\n👉 Tính h(Start) = {start.h} (Manhattan)"
+        steps.append(StepInfo('init', None, list(frontier), list(reached.values()), {start.label}, descInit))
+        
+        while frontier:
+            frontier.sort(key=lambda x: x.h)
+            node = frontier.pop(0)
             
-            if isGhost:
-                bg = TILE_BLANK if val == 0 else '#eaeef2'
-            elif val == 0:
-                bg = TILE_BLANK
-            elif isGoalState:
-                bg = TILE_GOAL_C
-            elif highlight == 'explored':
-                bg = TILE_EXP
-            elif newCells and (r, c) in newCells:
-                bg = TILE_NEW
-            else:
-                bg = TILE_BG
-
-            canvas.create_rectangle(cx, cy, cx + cell - 1, cy + cell - 1, fill=bg, outline=BORDER, width=1)
+            if node.state == goalTuple:
+                reached[node.state] = node
+                descFound = f"Lấy Node [{node.label}] ra xét:\n👉 Trạng thái CHÍNH LÀ ĐÍCH (h={node.h})!\n👉 Thuật toán thành công."
+                steps.append(StepInfo('found', node, list(frontier), list(reached.values()), set(), descFound))
+                return steps, list(reached.values())
+                
+            reached[node.state] = node
             
-            if val != 0:
-                fgColor = '#8c959f' if isGhost or highlight == 'explored' else WHITE
-                if isGhost or highlight == 'explored':
-                    fgColor = BLACK
-                canvas.create_text(cx + cell // 2, cy + cell // 2, text=str(val), fill=fgColor, font=('Segoe UI', 7, 'bold'))
+            newLabels = set()
+            for dirName, dr, dc in MOVE_DIRS:
+                childState = applyMove(node.state, dirName)
+                if childState is None:
+                    continue
+                    
+                inFrontier = next((n for n in frontier if n.state == childState), None)
+                inReached = childState in reached
+                
+                if not inFrontier and not inReached:
+                    child = createNode(childState, dirName, node.depth + 1, node)
+                    frontier.append(child)
+                    newLabels.add(child.label)
+                elif inFrontier or inReached:
+                    pass # Bỏ qua m
+                    
+            descExp = f"Mở rộng Node [{node.label}] (h={node.h}):\n👉 Thêm {len(newLabels)} node con hợp lệ vào FRONTIER."
+            steps.append(StepInfo('expand', node, list(frontier), list(reached.values()), newLabels, descExp))
+            
+        descFail = "Thất bại:\n👉 FRONTIER rỗng mà không tìm thấy Goal."
+        steps.append(StepInfo('failure', None, [], list(reached.values()), set(), descFail))
+        return steps, list(reached.values())
+
+    @staticmethod
+    def runAStar(initial, goal):
+        goalTuple = tuple(tuple(r) for r in goal)
+        labelIndex = [0]
+        
+        def createNode(state, action=None, depth=0, parentNode=None):
+            parentLabel = parentNode.label if parentNode else None
+            n = NodeInfo(state, action, depth, 0, parentLabel, generateLabel(labelIndex[0]), parent=parentNode)
+            n.h = calculateMisplacedTiles(state, goalTuple)
+            labelIndex[0] += 1
+            return n
+
+        steps = []
+        start = createNode(initial)
+        start.g = 0
+        start.cost = start.g + start.h
+        
+        frontier = [start]
+        reached = {}
+        
+        descInit = f"Khởi tạo A*:\n👉 FRONTIER = {{ [{start.label}] }}\n👉 f(Start) = g(0) + h({start.h}) = {start.cost}"
+        steps.append(StepInfo('init', None, list(frontier), list(reached.values()), {start.label}, descInit))
+        
+        while frontier:
+            frontier.sort(key=lambda x: x.cost)
+            node = frontier.pop(0)
+            
+            if node.state == goalTuple:
+                reached[node.state] = node
+                descFound = f"Lấy Node [{node.label}] ra xét:\n👉 Trạng thái CHÍNH LÀ ĐÍCH!\n👉 Thuật toán thành công."
+                steps.append(StepInfo('found', node, list(frontier), list(reached.values()), set(), descFound))
+                return steps, list(reached.values())
+                
+            reached[node.state] = node
+            
+            newLabels = set()
+            for dirName, dr, dc in MOVE_DIRS:
+                childState = applyMove(node.state, dirName)
+                if childState is None:
+                    continue
+                
+                cost_m = calculateInversions(childState)
+                g_new = node.g + cost_m
+                
+                inReached = reached.get(childState)
+                inFrontierIdx = next((i for i, n in enumerate(frontier) if n.state == childState), -1)
+                
+                if inReached:
+                    if g_new >= inReached.g:
+                        continue
+                    else:
+                        del reached[childState]
+                        inReached.g = g_new
+                        inReached.cost = inReached.g + inReached.h
+                        inReached.parent = node
+                        inReached.parentLabel = node.label
+                        inReached.action = dirName
+                        inReached.depth = node.depth + 1
+                        frontier.append(inReached)
+                        newLabels.add(inReached.label)
+                elif inFrontierIdx != -1:
+                    m = frontier[inFrontierIdx]
+                    if g_new < m.g:
+                        m.g = g_new
+                        m.cost = m.g + m.h
+                        m.parent = node
+                        m.parentLabel = node.label
+                        m.action = dirName
+                        m.depth = node.depth + 1
+                        newLabels.add(m.label)
+                else:
+                    child = createNode(childState, dirName, node.depth + 1, node)
+                    child.g = g_new
+                    child.cost = child.g + child.h
+                    frontier.append(child)
+                    newLabels.add(child.label)
+                    
+            descExp = f"Mở rộng Node [{node.label}] (f={node.cost}):\n👉 Xử lý {len(newLabels)} node con hợp lệ."
+            steps.append(StepInfo('expand', node, list(frontier), list(reached.values()), newLabels, descExp))
+            
+        descFail = "Thất bại:\n👉 FRONTIER rỗng mà không tìm thấy Goal."
+        steps.append(StepInfo('failure', None, [], list(reached.values()), set(), descFail))
+        return steps, list(reached.values())
 
 # ══════════════════════════════════════════════════
-#  MAIN APP GUI
+# 5. GIAO DIỆN & ỨNG DỤNG (UI/UX & APPLICATION)
 # ══════════════════════════════════════════════════
+
 class Main8PuzzleApp:
     def __init__(self, root):
         self.root = root
@@ -447,7 +631,9 @@ class Main8PuzzleApp:
             'BFS (Breadth-First Search)': SearchEngine.runBfs,
             'DFS (Depth-First Search)': SearchEngine.runDfs,
             'IDS (Iterative Deepening Search)': SearchEngine.runIds,
-            'UCS (Uniform-Cost Search)': SearchEngine.runUcs
+            'UCS (Uniform-Cost Search)': SearchEngine.runUcs,
+            'Greedy-Search (Heuristic)': SearchEngine.runGreedySearch,
+            'A* (A-Star Search)': SearchEngine.runAStar
         }
         self.currentAlgoName = 'BFS (Breadth-First Search)'
         self.steps = []
@@ -662,18 +848,29 @@ class Main8PuzzleApp:
             
             # Action
             actStr = f"Act: {ARROW_MAP.get(n.action, '')}"
-            canvas.create_text(x + 55, y + 20, text=actStr, font=('Consolas', 8), fill=BLACK, anchor='w')
+            c_y = y + 20
+            canvas.create_text(x + 55, c_y, text=actStr, font=('Consolas', 8), fill=BLACK, anchor='w')
+            c_y += 14
             
             # Depth/Cost
             infoStr = f"Dep: {n.depth}"
             if 'UCS' in self.currentAlgoName and n.cost > 0:
                 infoStr += f" | C:{n.cost}"
-            canvas.create_text(x + 55, y + 34, text=infoStr, font=('Consolas', 8), fill=GRAY, anchor='w')
+            elif 'Greedy' in self.currentAlgoName:
+                infoStr += f" | h:{n.h}"
+            elif 'A*' in self.currentAlgoName:
+                infoStr += f" | f:{n.cost}"
+            canvas.create_text(x + 55, c_y, text=infoStr, font=('Consolas', 8), fill=GRAY, anchor='w')
+            c_y += 14
+            
+            if 'A*' in self.currentAlgoName:
+                canvas.create_text(x + 55, c_y, text=f"g:{n.g}, h:{n.h}", font=('Consolas', 8), fill=GRAY, anchor='w')
+                c_y += 14
             
             # Parent
             parStr = f"Par: [{n.parentLabel}]" if n.parentLabel else ""
             if parStr:
-                canvas.create_text(x + 55, y + 48, text=parStr, font=('Consolas', 8), fill=PURPLE, anchor='w')
+                canvas.create_text(x + 55, c_y, text=parStr, font=('Consolas', 8), fill=PURPLE, anchor='w')
 
 
     def _showPath(self):
@@ -730,7 +927,8 @@ class Main8PuzzleApp:
                 f"Tên Node: [{node.label}]\n"
                 f"Hành động để đạt tới: {act}\n"
                 f"Độ sâu (Depth): {node.depth}\n"
-                f"Chi phí (Cost): {node.cost}\n"
+                f"Cost/f: {node.cost}\n"
+                f"h: {node.h}, g: {node.g}\n"
                 f"{par}\n\n"
             )
             if isGoal:
@@ -767,6 +965,8 @@ class Main8PuzzleApp:
             self.frontierTitleVar.set('Frontier — Stack (LIFO)')
         elif 'UCS' in self.currentAlgoName:
             self.frontierTitleVar.set('Frontier — Priority Queue (Min-Cost)')
+        elif 'Greedy' in self.currentAlgoName or 'A*' in self.currentAlgoName:
+            self.frontierTitleVar.set('Frontier — Priority List (Min-Eval)')
 
         # Phase banner styling
         phaseCfg = {
@@ -801,7 +1001,14 @@ class Main8PuzzleApp:
             drawBoard(self.curCanvas, 10, 10, n.state, cell=43, isGoalState=isGoal)
             self.curLabel.config(text=f'Node [{n.label}]')
             self.curAction.config(text=f'Action: {ARROW_MAP.get(n.action, "Start")}' if n.action else 'Action: Start')
-            self.curCost.config(text=f'Cost: {n.cost}' if 'UCS' in self.currentAlgoName else '')
+            if 'UCS' in self.currentAlgoName:
+                self.curCost.config(text=f'Cost: {n.cost}')
+            elif 'Greedy' in self.currentAlgoName:
+                self.curCost.config(text=f'h(n): {n.h}')
+            elif 'A*' in self.currentAlgoName:
+                self.curCost.config(text=f'f={n.cost} (g={n.g}, h={n.h})')
+            else:
+                self.curCost.config(text='')
             self.curDepth.config(text=f'Depth: {n.depth}')
             self.curParent.config(text=f'Parent: [{n.parentLabel}]' if n.parentLabel else 'Parent: —')
         else:
@@ -828,8 +1035,9 @@ class Main8PuzzleApp:
         display = []
         hasGhost = False
         
+        isQueueLike = 'BFS' in self.currentAlgoName or 'UCS' in self.currentAlgoName or 'Greedy' in self.currentAlgoName or 'A*' in self.currentAlgoName
         # Order of ghost depends on algorithm
-        if 'BFS' in self.currentAlgoName or 'UCS' in self.currentAlgoName:
+        if isQueueLike:
             if step.currentNode and step.phase in ('expand', 'found'):
                 display.append(('ghost', step.currentNode))
                 hasGhost = True
@@ -855,7 +1063,7 @@ class Main8PuzzleApp:
             isNew = node.label in step.newLabels
             isGhost = (kind == 'ghost')
             
-            if 'BFS' in self.currentAlgoName or 'UCS' in self.currentAlgoName:
+            if isQueueLike:
                 isNext = showNext and not isGhost and i == (1 if hasGhost else 0)
             else:
                 isNext = showNext and not isGhost and i == nFrontier - 1
@@ -877,20 +1085,47 @@ class Main8PuzzleApp:
 
             if isGhost:
                 c.create_text(tx, ty, text=f'[{node.label}]', anchor='nw', fill=GRAY, font=('Segoe UI', 8, 'bold'))
+                y_offset = ty + 14
                 act = ARROW_MAP.get(node.action, 'Start') if node.action else 'Start'
-                c.create_text(tx, ty + 14, text=f'Act: {act}', anchor='nw', fill=ghostClr, font=('Consolas', 8))
+                c.create_text(tx, y_offset, text=f'Act: {act}', anchor='nw', fill=ghostClr, font=('Consolas', 8))
+                y_offset += 14
+                
                 if 'UCS' in self.currentAlgoName:
-                    c.create_text(tx, ty + 28, text=f'Cost: {node.cost}', anchor='nw', fill=ghostClr, font=('Consolas', 8))
-                c.create_text(tx, ty + 42 if 'UCS' in self.currentAlgoName else ty + 28, text=f'Depth: {node.depth}', anchor='nw', fill=ghostClr, font=('Consolas', 8))
+                    c.create_text(tx, y_offset, text=f'Cost: {node.cost}', anchor='nw', fill=ghostClr, font=('Consolas', 8))
+                    y_offset += 14
+                elif 'Greedy' in self.currentAlgoName:
+                    c.create_text(tx, y_offset, text=f'h(n): {node.h}', anchor='nw', fill=ghostClr, font=('Consolas', 8))
+                    y_offset += 14
+                elif 'A*' in self.currentAlgoName:
+                    c.create_text(tx, y_offset, text=f'f={node.cost}', anchor='nw', fill=ghostClr, font=('Consolas', 8))
+                    y_offset += 14
+                    c.create_text(tx, y_offset, text=f'g={node.g}, h={node.h}', anchor='nw', fill=ghostClr, font=('Consolas', 8))
+                    y_offset += 14
+                
+                c.create_text(tx, y_offset, text=f'Depth: {node.depth}', anchor='nw', fill=ghostClr, font=('Consolas', 8))
             else:
                 tag = '  ⏩NEXT' if isNext else ('  ★NEW' if isNew else '')
                 lblCol = ACCENT if isNext else (ORANGE if isNew else (GREEN if isGoal else BLACK))
                 c.create_text(tx, ty, text=f'[{node.label}]{tag}', anchor='nw', fill=lblCol, font=('Segoe UI', 8, 'bold'))
+                
+                y_offset = ty + 14
                 act = ARROW_MAP.get(node.action, 'Start') if node.action else 'Start'
-                c.create_text(tx, ty + 14, text=f'Act: {act}', anchor='nw', fill=BLACK, font=('Consolas', 8))
+                c.create_text(tx, y_offset, text=f'Act: {act}', anchor='nw', fill=BLACK, font=('Consolas', 8))
+                y_offset += 14
+                
                 if 'UCS' in self.currentAlgoName:
-                    c.create_text(tx, ty + 28, text=f'Cost: {node.cost}', anchor='nw', fill=GREEN, font=('Consolas', 8))
-                c.create_text(tx, ty + 42 if 'UCS' in self.currentAlgoName else ty + 28, text=f'Depth: {node.depth}', anchor='nw', fill=GRAY, font=('Consolas', 8))
+                    c.create_text(tx, y_offset, text=f'Cost: {node.cost}', anchor='nw', fill=GREEN, font=('Consolas', 8))
+                    y_offset += 14
+                elif 'Greedy' in self.currentAlgoName:
+                    c.create_text(tx, y_offset, text=f'h(n): {node.h}', anchor='nw', fill=GREEN, font=('Consolas', 8))
+                    y_offset += 14
+                elif 'A*' in self.currentAlgoName:
+                    c.create_text(tx, y_offset, text=f'f={node.cost}', anchor='nw', fill=GREEN, font=('Consolas', 8))
+                    y_offset += 14
+                    c.create_text(tx, y_offset, text=f'g={node.g}, h={node.h}', anchor='nw', fill=GREEN, font=('Consolas', 8))
+                    y_offset += 14
+                
+                c.create_text(tx, y_offset, text=f'Depth: {node.depth}', anchor='nw', fill=GRAY, font=('Consolas', 8))
 
         totalItems = len(display)
         totalRows = (totalItems + cols - 1) // cols if totalItems else 1
@@ -926,13 +1161,29 @@ class Main8PuzzleApp:
             ty = y0 + 4
 
             c.create_text(tx, ty, text=f'[{node.label}]', anchor='nw', fill=BLACK, font=('Segoe UI', 8, 'bold'))
+            
+            y_offset = ty + 16
             act = ARROW_MAP.get(node.action, 'Start') if node.action else 'Start'
-            c.create_text(tx, ty + 16, text=f'Act: {act}', anchor='nw', fill=BLACK, font=('Consolas', 8))
+            c.create_text(tx, y_offset, text=f'Act: {act}', anchor='nw', fill=BLACK, font=('Consolas', 8))
+            y_offset += 14
+            
             if 'UCS' in self.currentAlgoName:
-                c.create_text(tx, ty + 30, text=f'Cost: {node.cost}', anchor='nw', fill=GREEN, font=('Consolas', 8))
-            c.create_text(tx, ty + 44 if 'UCS' in self.currentAlgoName else ty + 30, text=f'Dep: {node.depth}', anchor='nw', fill=GRAY, font=('Consolas', 8))
+                c.create_text(tx, y_offset, text=f'Cost: {node.cost}', anchor='nw', fill=GREEN, font=('Consolas', 8))
+                y_offset += 14
+            elif 'Greedy' in self.currentAlgoName:
+                c.create_text(tx, y_offset, text=f'h(n): {node.h}', anchor='nw', fill=GREEN, font=('Consolas', 8))
+                y_offset += 14
+            elif 'A*' in self.currentAlgoName:
+                c.create_text(tx, y_offset, text=f'f={node.cost}', anchor='nw', fill=GREEN, font=('Consolas', 8))
+                y_offset += 14
+                c.create_text(tx, y_offset, text=f'g={node.g}, h={node.h}', anchor='nw', fill=GREEN, font=('Consolas', 8))
+                y_offset += 14
+            
+            c.create_text(tx, y_offset, text=f'Dep: {node.depth}', anchor='nw', fill=GRAY, font=('Consolas', 8))
+            y_offset += 14
+            
             par = f'Par: [{node.parentLabel}]' if node.parentLabel else 'Par: —'
-            c.create_text(tx, ty + 58 if 'UCS' in self.currentAlgoName else ty + 44, text=par, anchor='nw', fill=PURPLE, font=('Consolas', 8))
+            c.create_text(tx, y_offset, text=par, anchor='nw', fill=PURPLE, font=('Consolas', 8))
 
         totalH = padY * 2 + len(exploredList) * itemH
         cw = max(c.winfo_width(), 200)
@@ -965,6 +1216,11 @@ class Main8PuzzleApp:
     def _stopAuto(self):
         self.autoMode = False
         self.btnAuto.config(text='▶ Auto', bg=ACCENT, fg=WHITE)
+
+
+# ══════════════════════════════════════════════════
+# 6. KHỞI CHẠY (MAIN EXECUTION)
+# ══════════════════════════════════════════════════
 
 
 if __name__ == '__main__':
