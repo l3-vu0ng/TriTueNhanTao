@@ -7,7 +7,7 @@ from tkinter import ttk, messagebox
 from collections import deque
 import heapq
 import itertools
-
+import random
 import functools
 
 INITIAL_STATE = ((2, 8, 3), (1, 6, 4), (7, 0, 5))
@@ -190,6 +190,29 @@ def countCorrectPositions(state, goalState) -> int:
             if state[r][c] == goalState[r][c]:
                 count += 1
     return count
+
+def generateRandomSolvableState(goalState, moves=10) -> tuple:
+    """Generates a solvable state by applying a sequence of random moves from the goal state."""
+    currentState = goalState
+    # Keep track of visited states during the walk to prevent simple backtracking
+    visited = {currentState}
+    
+    for _ in range(moves):
+        possibleStates = []
+        for dirName, dr, dc in MOVE_DIRS:
+            nextState = applyMove(currentState, dirName)
+            if nextState is not None:
+                possibleStates.append(nextState)
+        
+        # We prefer unvisited states to maximize state space exploration and prevent dead loops
+        unvisited = [s for s in possibleStates if s not in visited]
+        if unvisited:
+            currentState = random.choice(unvisited)
+        else:
+            currentState = random.choice(possibleStates)
+        visited.add(currentState)
+        
+    return currentState
 
 # ══════════════════════════════════════════════════
 # 4. THUẬT TOÁN TÌM KIẾM CỐT LÕI (CORE SEARCH ALGORITHMS)
@@ -784,6 +807,278 @@ class SearchEngine:
                 return steps, exploredList
 
     @staticmethod
+    def runStochasticHillClimbing(initial: tuple, goal: tuple) -> tuple[list[StepInfo], list[NodeInfo]]:
+        """Performs Stochastic Hill Climbing search to minimize Manhattan distance."""
+        goalTuple = tuple(tuple(r) for r in goal)
+        labelIndex = [0]
+
+        def createNode(state: tuple, action: str = None, depth: int = 0, parentNode: NodeInfo = None) -> NodeInfo:
+            parentLabel = parentNode.label if parentNode else None
+            n = NodeInfo(state, action, depth, 0, parentLabel, generateLabel(labelIndex[0]), parent=parentNode)
+            n.h = calculateManhattanDistance(state, goalTuple)
+            labelIndex[0] += 1
+            return n
+
+        steps: list[StepInfo] = []
+        exploredList: list[NodeInfo] = []
+
+        currentNode = createNode(initial)
+
+        if currentNode.state == goalTuple:
+            descFound = f"Khởi tạo Stochastic Hill Climbing:\n👉 Trạng thái bắt đầu [{currentNode.label}] (h={currentNode.h}) chính là ĐÍCH (GOAL)!"
+            steps.append(StepInfo('found', currentNode, [], [currentNode], set(), descFound))
+            exploredList.append(currentNode)
+            return steps, exploredList
+
+        descInit = f"Khởi tạo Stochastic Hill Climbing:\n👉 Trạng thái hiện tại: [{currentNode.label}] (h={currentNode.h})\n👉 Đặt làm Current_State để bắt đầu tìm kiếm."
+        steps.append(StepInfo('init', currentNode, [currentNode], list(exploredList), {currentNode.label}, descInit))
+
+        while True:
+            neighbors: list[NodeInfo] = []
+            for dirName, dr, dc in MOVE_DIRS:
+                childState = applyMove(currentNode.state, dirName)
+                if childState is not None:
+                    childNode = createNode(childState, dirName, currentNode.depth + 1, currentNode)
+                    neighbors.append(childNode)
+
+            if not neighbors:
+                exploredList.append(currentNode)
+                descFail = f"Thất bại:\n👉 Node [{currentNode.label}] (h={currentNode.h}) không có lân cận nào hợp lệ."
+                steps.append(StepInfo('failure', currentNode, [], list(exploredList), set(), descFail))
+                return steps, exploredList
+
+            # We filter only neighbors with lower h value since the 8-puzzle problem seeks to minimize Manhattan distance
+            betterNeighbors = [n for n in neighbors if n.h < currentNode.h]
+
+            if betterNeighbors:
+                # Stochastic Hill Climbing selects a node randomly from the set of all better neighbors
+                nextNode = random.choice(betterNeighbors)
+                
+                descExp = (
+                    f"Mở rộng Node [{currentNode.label}] (h={currentNode.h}):\n"
+                    f"👉 Xét tất cả {len(neighbors)} lân cận. Lọc ra {len(betterNeighbors)} lân cận tốt hơn (h < {currentNode.h}).\n"
+                    f"👉 Chọn ngẫu nhiên một lân cận tốt hơn: [{nextNode.label}] (h={nextNode.h}).\n"
+                    f"👉 Di chuyển sang Node [{nextNode.label}]."
+                )
+                steps.append(StepInfo('expand', currentNode, neighbors, list(exploredList) + [currentNode], {n.label for n in neighbors}, descExp))
+                exploredList.append(currentNode)
+                currentNode = nextNode
+
+                if currentNode.state == goalTuple:
+                    descFound = (
+                        f"Lấy Node [{currentNode.label}] ra xét:\n"
+                        f"👉 Trạng thái CHÍNH LÀ ĐÍCH (GOAL) (h=0)!\n"
+                        f"👉 Thuật toán tìm kiếm thành công."
+                    )
+                    steps.append(StepInfo('found', currentNode, [], list(exploredList) + [currentNode], set(), descFound))
+                    exploredList.append(currentNode)
+                    return steps, exploredList
+            else:
+                # If there are no better neighbors, we have hit a local maximum/minimum
+                exploredList.append(currentNode)
+                neighborDetails = ", ".join([f"[{n.label}] h={n.h} ({ARROW_MAP.get(n.action, '')})" for n in neighbors])
+                descFail = (
+                    f"Thất bại (Cực đại cục bộ / Local Maximum):\n"
+                    f"👉 Trạng thái hiện tại [{currentNode.label}] (h={currentNode.h}) không phải là Goal.\n"
+                    f"👉 Đã xét toàn bộ {len(neighbors)} lân cận: {neighborDetails}.\n"
+                    f"👉 Không có lân cận nào tốt hơn (nhỏ hơn {currentNode.h}). Thuật toán dừng lại."
+                )
+                steps.append(StepInfo('failure', currentNode, neighbors, list(exploredList), set(), descFail))
+                return steps, exploredList
+
+    @staticmethod
+    def runRandomRestartHillClimbing(initial: tuple, goal: tuple) -> tuple[list[StepInfo], list[NodeInfo]]:
+        """Performs Random Restart Hill Climbing search."""
+        goalTuple = tuple(tuple(r) for r in goal)
+        labelIndex = [0]
+        MAX_RESTART = 5
+
+        def createNode(state: tuple, action: str = None, depth: int = 0, parentNode: NodeInfo = None) -> NodeInfo:
+            parentLabel = parentNode.label if parentNode else None
+            n = NodeInfo(state, action, depth, 0, parentLabel, generateLabel(labelIndex[0]), parent=parentNode)
+            n.h = calculateManhattanDistance(state, goalTuple)
+            labelIndex[0] += 1
+            return n
+
+        steps: list[StepInfo] = []
+        exploredList: list[NodeInfo] = []
+
+        for restart_idx in range(1, MAX_RESTART + 1):
+            currentNode = createNode(initial)
+
+            descInit = (
+                f"--- BẮT ĐẦU RESTART LẦN {restart_idx} / {MAX_RESTART} ---\n"
+                f"👉 Đặt Current_State = Start (h={currentNode.h}).\n"
+                f"👉 Bắt đầu chạy Stochastic Hill Climbing cho lượt này."
+            )
+            steps.append(StepInfo('restart', currentNode, [currentNode], list(exploredList), {currentNode.label}, descInit))
+
+            if currentNode.state == goalTuple:
+                descFound = f"Lượt {restart_idx}: Trạng thái bắt đầu [{currentNode.label}] (h={currentNode.h}) chính là ĐÍCH (GOAL)!"
+                steps.append(StepInfo('found', currentNode, [], list(exploredList) + [currentNode], set(), descFound))
+                exploredList.append(currentNode)
+                return steps, exploredList
+
+            stuck = False
+            while not stuck:
+                neighbors: list[NodeInfo] = []
+                for dirName, dr, dc in MOVE_DIRS:
+                    childState = applyMove(currentNode.state, dirName)
+                    if childState is not None:
+                        childNode = createNode(childState, dirName, currentNode.depth + 1, currentNode)
+                        neighbors.append(childNode)
+
+                if not neighbors:
+                    exploredList.append(currentNode)
+                    stuck = True
+                    descFail = f"Lượt {restart_idx}: Node [{currentNode.label}] không có lân cận hợp lệ. Nhảy sang lượt restart tiếp theo."
+                    steps.append(StepInfo('cutoff', currentNode, [], list(exploredList), set(), descFail))
+                    break
+
+                betterNeighbors = [n for n in neighbors if n.h < currentNode.h]
+
+                if betterNeighbors:
+                    nextNode = random.choice(betterNeighbors)
+                    descExp = (
+                        f"Lượt {restart_idx} - Mở rộng [{currentNode.label}] (h={currentNode.h}):\n"
+                        f"👉 Sinh {len(neighbors)} lân cận, lọc ra {len(betterNeighbors)} lân cận tốt hơn.\n"
+                        f"👉 Chọn ngẫu nhiên lân cận tốt hơn: [{nextNode.label}] (h={nextNode.h})."
+                    )
+                    steps.append(StepInfo('expand', currentNode, neighbors, list(exploredList) + [currentNode], {n.label for n in neighbors}, descExp))
+                    exploredList.append(currentNode)
+                    currentNode = nextNode
+
+                    if currentNode.state == goalTuple:
+                        descFound = (
+                            f"Lượt {restart_idx}: Tìm thấy ĐÍCH (GOAL)!\n"
+                            f"👉 Node [{currentNode.label}] (h=0) đạt Goal.\n"
+                            f"👉 Thuật toán dừng lại thành công."
+                        )
+                        steps.append(StepInfo('found', currentNode, [], list(exploredList) + [currentNode], set(), descFound))
+                        exploredList.append(currentNode)
+                        return steps, exploredList
+                else:
+                    exploredList.append(currentNode)
+                    stuck = True
+                    neighborDetails = ", ".join([f"[{n.label}] h={n.h} ({ARROW_MAP.get(n.action, '')})" for n in neighbors])
+                    descFail = (
+                        f"Lượt {restart_idx} bị kẹt (Cực đại cục bộ / Local Maximum):\n"
+                        f"👉 Node [{currentNode.label}] (h={currentNode.h}) không tốt hơn lân cận nào.\n"
+                        f"👉 Đã xét {len(neighbors)} lân cận: {neighborDetails}.\n"
+                        f"👉 Nhảy sang lượt restart tiếp theo."
+                    )
+                    steps.append(StepInfo('cutoff', currentNode, neighbors, list(exploredList), set(), descFail))
+                    break
+
+        descFailAll = f"Thất bại:\n👉 Đã chạy hết {MAX_RESTART} lượt restart mà không tìm thấy Goal."
+        steps.append(StepInfo('failure', None, [], list(exploredList), set(), descFailAll))
+        return steps, exploredList
+
+    @staticmethod
+    def runLocalBeamSearch(initial: tuple, goal: tuple) -> tuple[list[StepInfo], list[NodeInfo]]:
+        """Performs Local Beam Search with beam width k."""
+        goalTuple = tuple(tuple(r) for r in goal)
+        labelIndex = [0]
+        k = 3
+
+        def createNode(state: tuple, action: str = None, depth: int = 0, parentNode: NodeInfo = None) -> NodeInfo:
+            parentLabel = parentNode.label if parentNode else None
+            n = NodeInfo(state, action, depth, 0, parentLabel, generateLabel(labelIndex[0]), parent=parentNode)
+            n.h = calculateManhattanDistance(state, goalTuple)
+            labelIndex[0] += 1
+            return n
+
+        steps: list[StepInfo] = []
+        exploredList: list[NodeInfo] = []
+        global_seen_states = set()
+
+        # 1. Khởi tạo: Current_State_set = {Các Node lân cận hợp lệ từ Start}
+        startNode = createNode(initial)
+        exploredList.append(startNode)
+        global_seen_states.add(startNode.state)
+
+        initial_neighbors: list[NodeInfo] = []
+        for dirName, dr, dc in MOVE_DIRS:
+            childState = applyMove(startNode.state, dirName)
+            if childState is not None and childState not in global_seen_states:
+                global_seen_states.add(childState)
+                initial_neighbors.append(createNode(childState, dirName, startNode.depth + 1, startNode))
+                
+        # Chọn tối đa k node có h nhỏ nhất từ các lân cận của Start
+        initial_neighbors.sort(key=lambda n: n.h)
+        beam = initial_neighbors[:k]
+
+        descInit = (
+            f"Bước 0: Khởi tạo Local Beam Search (k={k}):\n"
+            f"👉 Từ Start [{startNode.label}], sinh ra {len(initial_neighbors)} lân cận.\n"
+            f"👉 Chọn {len(beam)} trạng thái tốt nhất: " + ", ".join([f"[{n.label}] (h={n.h})" for n in beam]) + ".\n"
+            f"👉 Bỏ qua trạng thái Start và chuyển các lân cận này thành chùm trạng thái hiện tại (bước 1)."
+        )
+        steps.append(StepInfo('init', startNode, list(beam), list(exploredList), {n.label for n in beam}, descInit))
+
+        for n in beam:
+            if n.state == goalTuple:
+                descFound = f"Lần lọc đầu tiên: Phát hiện Node [{n.label}] (h={n.h}) chính là ĐÍCH (GOAL)!"
+                steps.append(StepInfo('found', n, [], list(exploredList) + beam, set(), descFound))
+                return steps, exploredList
+
+        iteration = 0
+        max_iterations = 200
+
+        while iteration < max_iterations:
+            iteration += 1
+            neighbor_nodes: list[NodeInfo] = []
+            
+            for parentNode in beam:
+                exploredList.append(parentNode)
+                for dirName, dr, dc in MOVE_DIRS:
+                    childState = applyMove(parentNode.state, dirName)
+                    if childState is not None and childState not in global_seen_states:
+                        global_seen_states.add(childState)
+                        childNode = createNode(childState, dirName, parentNode.depth + 1, parentNode)
+                        neighbor_nodes.append(childNode)
+
+            goalNode = next((n for n in neighbor_nodes if n.state == goalTuple), None)
+            if goalNode:
+                descExp = (
+                    f"Vòng {iteration} - Mở rộng chùm:\n"
+                    f"👉 Sinh ra {len(neighbor_nodes)} lân cận từ chùm hiện tại.\n"
+                    f"👉 Phát hiện lân cận [{goalNode.label}] (h=0) là ĐÍCH (GOAL)!"
+                )
+                steps.append(StepInfo('expand', list(beam), neighbor_nodes, list(exploredList), {n.label for n in neighbor_nodes}, descExp))
+
+                descFound = (
+                    f"Tìm thấy ĐÍCH (GOAL)!\n"
+                    f"👉 Node [{goalNode.label}] (h=0) đạt Goal.\n"
+                    f"👉 Thuật toán dừng lại thành công."
+                )
+                steps.append(StepInfo('found', goalNode, [], list(exploredList) + [goalNode], set(), descFound))
+                exploredList.append(goalNode)
+                return steps, exploredList
+
+            descExp = (
+                f"Vòng {iteration} - Mở rộng chùm:\n"
+                f"👉 Sinh ra {len(neighbor_nodes)} lân cận từ chùm hiện tại.\n"
+                f"👉 Không có lân cận nào là Goal. Chuẩn bị lựa chọn chùm mới."
+            )
+            steps.append(StepInfo('expand', list(beam), neighbor_nodes, list(exploredList), {n.label for n in neighbor_nodes}, descExp))
+
+            neighbor_nodes.sort(key=lambda x: x.h)
+            beam = neighbor_nodes[:k]
+
+            beamLabels = ", ".join([f"[{n.label}] (h={n.h})" for n in beam])
+            descSelect = (
+                f"Vòng {iteration} - Lựa chọn chùm:\n"
+                f"👉 Sắp xếp {len(neighbor_nodes)} lân cận theo h tăng dần.\n"
+                f"👉 Chọn k={k} lân cận tốt nhất làm chùm mới: {beamLabels}."
+            )
+            steps.append(StepInfo('cutoff', list(beam), list(beam), list(exploredList), {n.label for n in beam}, descSelect))
+
+        descFail = f"Thất bại:\n👉 Đạt giới hạn số vòng lặp tối đa ({max_iterations}) mà không tìm thấy Goal."
+        steps.append(StepInfo('failure', None, [], list(exploredList), set(), descFail))
+        return steps, exploredList
+
+    @staticmethod
     def runIdaStar(initial: tuple, goal: tuple) -> tuple[list[StepInfo], list[NodeInfo]]:
         """Performs Iterative Deepening A* (IDA*) search."""
         goalTuple = tuple(tuple(r) for r in goal)
@@ -918,43 +1213,250 @@ class Main8PuzzleApp:
             'A* (A-Star Search)': SearchEngine.runAStar,
             'IDA* (Iterative Deepening A*)': SearchEngine.runIdaStar,
             'Simple Hill Climbing (SHC)': SearchEngine.runSimpleHillClimbing,
-            'Steepest-Ascent Hill Climbing (SAHC)': SearchEngine.runSteepestAscentHillClimbing
+            'Steepest-Ascent Hill Climbing (SAHC)': SearchEngine.runSteepestAscentHillClimbing,
+            'Stochastic Hill Climbing (StHC)': SearchEngine.runStochasticHillClimbing,
+            'Random Restart Hill Climbing (RRHC)': SearchEngine.runRandomRestartHillClimbing,
+            'Local Beam Search (LBS)': SearchEngine.runLocalBeamSearch
         }
         self.algoGroups = {
-            'Tìm kiếm mù (Uninformed Search)': [
+            'Uninformed Search': [
                 'BFS (Breadth-First Search)',
                 'DFS (Depth-First Search)',
                 'IDS (Iterative Deepening Search)',
                 'UCS (Uniform-Cost Search)'
             ],
-            'Tìm kiếm Heuristic (Heuristic Search)': [
+            'Informed Search': [
                 'Greedy-Search (Heuristic)',
                 'A* (A-Star Search)',
                 'IDA* (Iterative Deepening A*)'
             ],
-            'Tìm kiếm Local Search (Local Search)': [
+            'Hill Climbing (Local Search)': [
                 'Simple Hill Climbing (SHC)',
-                'Steepest-Ascent Hill Climbing (SAHC)'
+                'Steepest-Ascent Hill Climbing (SAHC)',
+                'Stochastic Hill Climbing (StHC)',
+                'Random Restart Hill Climbing (RRHC)'
+            ],
+            'Local Beam Search': [
+                'Local Beam Search (LBS)'
             ]
         }
-        self.currentGroupName = 'Tìm kiếm mù (Uninformed Search)'
+        self.currentGroupName = 'Uninformed Search'
         self.currentAlgoName = 'BFS (Breadth-First Search)'
         self.steps = []
         self.exploredMaster = []
         self.idx = 0
         self.autoMode = False
         self.speed = tk.IntVar(value=400)
+        self.startState = INITIAL_STATE
+        self.goalState = GOAL_STATE
 
         self._buildUi()
         self._loadAlgorithm(self.currentAlgoName)
 
     def _loadAlgorithm(self, algoName: str) -> None:
         algoFunc = self.algorithms[algoName]
-        self.steps, self.exploredMaster = algoFunc(INITIAL_STATE, GOAL_STATE)
+        self.steps, self.exploredMaster = algoFunc(self.startState, self.goalState)
         self.idx = 0
         self._stopAuto()
         self.algoTitleVar.set(f'8-Puzzle — {algoName}')
         self._render(0)
+
+    def _drawGoalBoard(self) -> None:
+        """Draws the goal board canvas with the current goalState configuration."""
+        self.goalCanvas.delete('all')
+        drawBoard(self.goalCanvas, 10, 10, self.goalState, cell=43, isGoalState=True)
+
+    def _openCustomStatesDialog(self) -> None:
+        """Opens a popup dialog to enter custom Start and Goal states."""
+        self._stopAuto()
+        
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Nhập Start & Goal")
+        dialog.geometry("500x420")
+        dialog.configure(bg=BG)
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        # Center dialog relative to root window
+        dialog.update_idletasks()
+        rx = self.root.winfo_x()
+        ry = self.root.winfo_y()
+        rw = self.root.winfo_width()
+        rh = self.root.winfo_height()
+        dx = rx + (rw - 500) // 2
+        dy = ry + (rh - 420) // 2
+        dialog.geometry(f"+{dx}+{dy}")
+
+        # Title Label
+        tk.Label(dialog, text="Nhập Cấu Hình Start & Goal", font=('Segoe UI', 12, 'bold'), bg=BG, fg=BLACK).pack(pady=10)
+
+        # Grids Container
+        gridsFrame = tk.Frame(dialog, bg=BG)
+        gridsFrame.pack(padx=20, pady=5, fill='both', expand=True)
+
+        # Left: Start State Grid
+        startFrame = tk.Frame(gridsFrame, bg=BG)
+        startFrame.pack(side='left', padx=15, fill='both', expand=True)
+        tk.Label(startFrame, text="Start State", font=('Segoe UI', 10, 'bold'), bg=BG, fg=GRAY).pack(pady=(0, 5))
+        
+        startGridFrame = tk.Frame(startFrame, bg=BG, highlightthickness=1, highlightbackground=BORDER)
+        startGridFrame.pack()
+
+        startEntries = []
+        for r in range(3):
+            rowEntries = []
+            for c in range(3):
+                val = self.startState[r][c]
+                ent = tk.Entry(startGridFrame, width=3, font=('Segoe UI', 14, 'bold'), justify='center', bd=1, relief='solid')
+                ent.insert(0, str(val))
+                ent.grid(row=r, column=c, padx=3, pady=3, ipady=4)
+                rowEntries.append(ent)
+            startEntries.append(rowEntries)
+
+        # Right: Goal State Grid
+        goalFrame = tk.Frame(gridsFrame, bg=BG)
+        goalFrame.pack(side='right', padx=15, fill='both', expand=True)
+        tk.Label(goalFrame, text="Goal State", font=('Segoe UI', 10, 'bold'), bg=BG, fg=GRAY).pack(pady=(0, 5))
+        
+        goalGridFrame = tk.Frame(goalFrame, bg=BG, highlightthickness=1, highlightbackground=BORDER)
+        goalGridFrame.pack()
+
+        goalEntries = []
+        for r in range(3):
+            rowEntries = []
+            for c in range(3):
+                val = self.goalState[r][c]
+                ent = tk.Entry(goalGridFrame, width=3, font=('Segoe UI', 14, 'bold'), justify='center', bd=1, relief='solid')
+                ent.insert(0, str(val))
+                ent.grid(row=r, column=c, padx=3, pady=3, ipady=4)
+                rowEntries.append(ent)
+            goalEntries.append(rowEntries)
+
+        # Inner helpers for random generation inside dialog
+        def randomizeStart():
+            # Read goal from entry fields if valid, otherwise fallback to app's goalState
+            goalList = []
+            goalValid = True
+            for r in range(3):
+                for c in range(3):
+                    valStr = goalEntries[r][c].get().strip()
+                    if not valStr.isdigit() or int(valStr) < 0 or int(valStr) > 8:
+                        goalValid = False
+                        break
+                    goalList.append(int(valStr))
+                if not goalValid:
+                    break
+            
+            if goalValid and len(set(goalList)) == 9:
+                tempGoal = tuple(tuple(goalList[i*3 : (i+1)*3]) for i in range(3))
+            else:
+                tempGoal = self.goalState
+
+            # We use 10-step random walk to ensure solvability and fast pathfinding
+            randStart = generateRandomSolvableState(tempGoal)
+            for r in range(3):
+                for c in range(3):
+                    startEntries[r][c].delete(0, 'end')
+                    startEntries[r][c].insert(0, str(randStart[r][c]))
+
+        def randomizeGoal():
+            # Generate random Goal permutation
+            numbers = list(range(9))
+            random.shuffle(numbers)
+            randGoal = tuple(tuple(numbers[i*3 : (i+1)*3]) for i in range(3))
+            for r in range(3):
+                for c in range(3):
+                    goalEntries[r][c].delete(0, 'end')
+                    goalEntries[r][c].insert(0, str(randGoal[r][c]))
+            
+            # Automatically align Start state to be solvable relative to this new Goal
+            randStart = generateRandomSolvableState(randGoal)
+            for r in range(3):
+                for c in range(3):
+                    startEntries[r][c].delete(0, 'end')
+                    startEntries[r][c].insert(0, str(randStart[r][c]))
+
+        # Buttons under each grid
+        tk.Button(startFrame, text="🎲 Random Start", command=randomizeStart, bg='#eaeef2', fg=BLACK, font=('Segoe UI', 9, 'bold'), relief='flat', cursor='hand2', bd=0, padx=10, pady=3).pack(pady=10)
+        tk.Button(goalFrame, text="🎲 Random Goal", command=randomizeGoal, bg='#eaeef2', fg=BLACK, font=('Segoe UI', 9, 'bold'), relief='flat', cursor='hand2', bd=0, padx=10, pady=3).pack(pady=10)
+
+        # Helper note
+        tk.Label(dialog, text="* Nhập các số từ 0 đến 8 (0 biểu thị ô trống).", font=('Segoe UI', 8, 'italic'), bg=BG, fg=GRAY).pack(pady=(5, 0))
+
+        # Error Label
+        errVar = tk.StringVar()
+        errLbl = tk.Label(dialog, textvariable=errVar, font=('Segoe UI', 9), bg=BG, fg=RED, wraplength=450)
+        errLbl.pack(pady=5)
+
+        def validateAndSave():
+            # Parse start state
+            startList = []
+            for r in range(3):
+                for c in range(3):
+                    valStr = startEntries[r][c].get().strip()
+                    if not valStr.isdigit():
+                        errVar.set("Lỗi: Start State chỉ được chứa các chữ số từ 0 đến 8!")
+                        return
+                    val = int(valStr)
+                    if val < 0 or val > 8:
+                        errVar.set("Lỗi: Các số của Start State phải từ 0 đến 8!")
+                        return
+                    startList.append(val)
+
+            # Check duplicates in start state
+            if len(set(startList)) != 9:
+                errVar.set("Lỗi: Start State phải chứa đủ 9 số khác nhau từ 0 đến 8!")
+                return
+
+            # Parse goal state
+            goalList = []
+            for r in range(3):
+                for c in range(3):
+                    valStr = goalEntries[r][c].get().strip()
+                    if not valStr.isdigit():
+                        errVar.set("Lỗi: Goal State chỉ được chứa các chữ số từ 0 đến 8!")
+                        return
+                    val = int(valStr)
+                    if val < 0 or val > 8:
+                        errVar.set("Lỗi: Các số của Goal State phải từ 0 đến 8!")
+                        return
+                    goalList.append(val)
+
+            # Check duplicates in goal state
+            if len(set(goalList)) != 9:
+                errVar.set("Lỗi: Goal State phải chứa đủ 9 số khác nhau từ 0 đến 8!")
+                return
+
+            # Convert to tuple representation
+            newStart = tuple(tuple(startList[i*3 : (i+1)*3]) for i in range(3))
+            newGoal = tuple(tuple(goalList[i*3 : (i+1)*3]) for i in range(3))
+
+            # Verify solvability
+            startInversions = calculateInversions(newStart)
+            goalInversions = calculateInversions(newGoal)
+            if startInversions % 2 != goalInversions % 2:
+                errVar.set("Lỗi: Trạng thái bắt đầu không thể giải được để đến trạng thái đích (không cùng tính chẵn lẻ của nghịch vị)!")
+                return
+
+            # If all valid, update state
+            self.startState = newStart
+            self.goalState = newGoal
+            
+            # Redraw goal panel board
+            self._drawGoalBoard()
+            
+            # Reload algorithms with new configurations
+            self._loadAlgorithm(self.currentAlgoName)
+            dialog.destroy()
+
+        # Action Buttons
+        btnFrame = tk.Frame(dialog, bg=BG)
+        btnFrame.pack(pady=10)
+        
+        bs = dict(font=('Segoe UI', 9, 'bold'), relief='flat', cursor='hand2', padx=15, pady=4, bd=0)
+        tk.Button(btnFrame, text="Lưu cấu hình", command=validateAndSave, bg=GREEN, fg=WHITE, **bs).pack(side='left', padx=10)
+        tk.Button(btnFrame, text="Hủy bỏ", command=dialog.destroy, bg='#eaeef2', fg=BLACK, **bs).pack(side='left', padx=10)
 
     def _onAlgoChange(self, event: tk.Event) -> None:
         newAlgo = self.comboAlgo.get()
@@ -1046,6 +1548,7 @@ class Main8PuzzleApp:
         tk.Button(btnFrame, text='Tiếp ▶', command=self._goNext, bg='#eaeef2', fg=BLACK, **bs).grid(row=0, column=3, padx=2)
         tk.Button(btnFrame, text='⏭', command=self._goLast, bg='#eaeef2', fg=BLACK, **bs).grid(row=0, column=4, padx=2)
         tk.Button(btnFrame, text='🛣 Show Path', command=self._showPath, bg=PURPLE, fg=WHITE, **bs).grid(row=0, column=5, padx=8)
+        tk.Button(btnFrame, text='✏️ Custom States', command=self._openCustomStatesDialog, bg=GRAY, fg=WHITE, **bs).grid(row=0, column=6, padx=8)
 
         # Speed scale
         speedFrame = tk.Frame(rightCtrlFrame, bg=PANEL)
@@ -1100,9 +1603,9 @@ class Main8PuzzleApp:
 
     def _buildGoalPanel(self, parent):
         pnl = self._panel(parent, 'Goal Node')
-        gc = tk.Canvas(pnl, width=150, height=150, bg=BG, highlightthickness=0)
-        gc.pack(pady=(14, 4))
-        drawBoard(gc, 10, 10, GOAL_STATE, cell=43, isGoalState=True)
+        self.goalCanvas = tk.Canvas(pnl, width=150, height=150, bg=BG, highlightthickness=0)
+        self.goalCanvas.pack(pady=(14, 4))
+        self._drawGoalBoard()
 
     def _buildFrontierPanel(self, parent):
         self.frontierTitleVar = tk.StringVar(value='Frontier')
@@ -1160,7 +1663,7 @@ class Main8PuzzleApp:
         self.phaseBadge = tk.Label(iconFrame, text='INIT', bg=ACCENT, fg=WHITE, font=('Segoe UI', 9, 'bold'), padx=8, pady=2)
         self.phaseBadge.pack(side='left')
 
-        self.descLbl = tk.Label(leftInfo, text='', bg=PANEL, fg=BLACK, font=('Segoe UI', 11, 'bold'), anchor='nw', justify='left', width=45)
+        self.descLbl = tk.Label(leftInfo, text='', bg=PANEL, fg=BLACK, font=('Segoe UI', 11, 'bold'), anchor='nw', justify='left', width=65)
         self.descLbl.pack(anchor='w', fill='y', expand=True)
 
         # Right section: Canvas for newly generated nodes
@@ -1198,7 +1701,7 @@ class Main8PuzzleApp:
             infoStr = f"Dep: {n.depth}"
             if 'UCS' in self.currentAlgoName and n.cost > 0:
                 infoStr += f" | C:{n.cost}"
-            elif 'Greedy' in self.currentAlgoName or 'Hill Climbing' in self.currentAlgoName:
+            elif 'Greedy' in self.currentAlgoName or 'Hill Climbing' in self.currentAlgoName or 'Beam Search' in self.currentAlgoName:
                 infoStr += f" | h:{n.h}"
             elif 'A*' in self.currentAlgoName or 'IDA*' in self.currentAlgoName:
                 infoStr += f" | f:{n.cost}"
@@ -1313,11 +1816,14 @@ class Main8PuzzleApp:
             self.frontierTitleVar.set('Frontier — Active Nodes (f-Limit)')
         elif 'Hill Climbing' in self.currentAlgoName:
             self.frontierTitleVar.set('Frontier — Neighbors (Candidates)')
+        elif 'Beam Search' in self.currentAlgoName:
+            self.frontierTitleVar.set('Frontier — Active Beam / Neighbors')
 
         # Phase banner styling
         phaseCfg = {
             'init':      (ACCENT, WHITE, '🔵', 'INIT'),
             'new_limit': (PURPLE, WHITE, '🟣', 'NEW LIMIT'),
+            'restart':   (PURPLE, WHITE, '🟣', 'RESTART'),
             'expand':    (ORANGE, WHITE, '🟠', 'EXPAND'),
             'found':     (GREEN,  WHITE, '🟢', 'FOUND'),
             'cutoff':    ('#e3b341', BLACK, '🟡', 'CUTOFF'),
@@ -1342,21 +1848,38 @@ class Main8PuzzleApp:
         # Current Node
         self.curCanvas.delete('all')
         if step.currentNode:
-            n = step.currentNode
-            isGoal = (n.state == GOAL_STATE)
-            drawBoard(self.curCanvas, 10, 10, n.state, cell=43, isGoalState=isGoal)
-            self.curLabel.config(text=f'Node [{n.label}]')
-            self.curAction.config(text=f'Action: {ARROW_MAP.get(n.action, "Start")}' if n.action else 'Action: Start')
-            if 'UCS' in self.currentAlgoName:
-                self.curCost.config(text=f'Cost: {n.cost}')
-            elif 'Greedy' in self.currentAlgoName or 'Hill Climbing' in self.currentAlgoName:
-                self.curCost.config(text=f'h(n): {n.h}')
-            elif 'A*' in self.currentAlgoName or 'IDA*' in self.currentAlgoName:
-                self.curCost.config(text=f'f={n.cost} (g={n.g}, h={n.h})')
+            if isinstance(step.currentNode, list):
+                if len(step.currentNode) > 0:
+                    n = step.currentNode[0]
+                    isGoal = any(x.state == self.goalState for x in step.currentNode)
+                    drawBoard(self.curCanvas, 10, 10, n.state, cell=43, isGoalState=isGoal)
+                    self.curLabel.config(text=f'Beam: {len(step.currentNode)} Nodes')
+                    self.curAction.config(text=f'Trạng thái: Đang xét chùm')
+                    self.curCost.config(text='')
+                    self.curDepth.config(text='')
+                    self.curParent.config(text='')
+                else:
+                    self.curLabel.config(text='—')
+                    self.curAction.config(text='')
+                    self.curCost.config(text='')
+                    self.curDepth.config(text='')
+                    self.curParent.config(text='')
             else:
-                self.curCost.config(text='')
-            self.curDepth.config(text=f'Depth: {n.depth}')
-            self.curParent.config(text=f'Parent: [{n.parentLabel}]' if n.parentLabel else 'Parent: —')
+                n = step.currentNode
+                isGoal = (n.state == self.goalState)
+                drawBoard(self.curCanvas, 10, 10, n.state, cell=43, isGoalState=isGoal)
+                self.curLabel.config(text=f'Node [{n.label}]')
+                self.curAction.config(text=f'Action: {ARROW_MAP.get(n.action, "Start")}' if n.action else 'Action: Start')
+                if 'UCS' in self.currentAlgoName:
+                    self.curCost.config(text=f'Cost: {n.cost}')
+                elif 'Greedy' in self.currentAlgoName or 'Hill Climbing' in self.currentAlgoName or 'Beam Search' in self.currentAlgoName:
+                    self.curCost.config(text=f'h(n): {n.h}')
+                elif 'A*' in self.currentAlgoName or 'IDA*' in self.currentAlgoName:
+                    self.curCost.config(text=f'f={n.cost} (g={n.g}, h={n.h})')
+                else:
+                    self.curCost.config(text='')
+                self.curDepth.config(text=f'Depth: {n.depth}')
+                self.curParent.config(text=f'Parent: [{n.parentLabel}]' if n.parentLabel else 'Parent: —')
         else:
             self.curLabel.config(text='—')
             self.curAction.config(text='')
@@ -1381,29 +1904,47 @@ class Main8PuzzleApp:
         display = []
         hasGhost = False
         
-        isQueueLike = 'BFS' in self.currentAlgoName or 'UCS' in self.currentAlgoName or 'Greedy' in self.currentAlgoName or 'A*' in self.currentAlgoName or 'Hill Climbing' in self.currentAlgoName
+        isQueueLike = 'BFS' in self.currentAlgoName or 'UCS' in self.currentAlgoName or 'Greedy' in self.currentAlgoName or 'A*' in self.currentAlgoName or 'Hill Climbing' in self.currentAlgoName or 'Beam Search' in self.currentAlgoName
         # Order of ghost depends on algorithm
         if isQueueLike:
-            if step.currentNode and step.phase in ('expand', 'found', 'failure'):
-                display.append(('ghost', step.currentNode))
-                hasGhost = True
+            if step.currentNode and step.phase in ('expand', 'found', 'failure', 'cutoff'):
+                if isinstance(step.currentNode, list):
+                    for cn in step.currentNode:
+                        display.append(('ghost', cn))
+                    hasGhost = True
+                else:
+                    display.append(('ghost', step.currentNode))
+                    hasGhost = True
             for node in step.frontier:
                 display.append(('normal', node))
         else: # DFS, IDS, IDA*
             for node in step.frontier:
                 display.append(('normal', node))
             if step.currentNode and step.phase in ('expand', 'found', 'cutoff', 'failure'):
-                display.append(('ghost', step.currentNode))
-                hasGhost = True
+                if isinstance(step.currentNode, list):
+                    for cn in step.currentNode:
+                        display.append(('ghost', cn))
+                    hasGhost = True
+                else:
+                    display.append(('ghost', step.currentNode))
+                    hasGhost = True
 
         nFrontier = len(step.frontier)
         showNext = step.phase in ('init', 'new_limit', 'expand', 'cutoff') and nFrontier > 0
 
-        nextCurrentNode = None
+        nextCurrentNodeLabels = set()
         if self.idx < len(self.steps) - 1:
             nextStep = self.steps[self.idx + 1]
-            if nextStep.currentNode:
-                nextCurrentNode = nextStep.currentNode
+            if 'Beam Search' in self.currentAlgoName:
+                if nextStep.phase == 'cutoff':
+                    nextCurrentNodeLabels = {n.label for n in nextStep.frontier}
+                elif nextStep.phase == 'expand':
+                    nextCurrentNodeLabels = {n.label for n in step.frontier}
+                elif nextStep.phase == 'found' and nextStep.currentNode:
+                    nextCurrentNodeLabels.add(nextStep.currentNode.label)
+            else:
+                if nextStep.currentNode:
+                    nextCurrentNodeLabels.add(nextStep.currentNode.label)
 
         for i, (kind, node) in enumerate(display):
             col = i % cols
@@ -1411,14 +1952,13 @@ class Main8PuzzleApp:
             x0 = padX + col * colW
             y0 = padY + row * itemH
 
-            isGoal = (node.state == GOAL_STATE)
+            isGoal = (node.state == self.goalState)
             isNew = node.label in step.newLabels
             isGhost = (kind == 'ghost')
             
             isNext = False
-            if showNext and not isGhost and nextCurrentNode:
-                if node.state == nextCurrentNode.state:
-                    isNext = True
+            if showNext and not isGhost and (node.label in nextCurrentNodeLabels):
+                isNext = True
 
             if isGhost:
                 c.create_rectangle(x0 - 3, y0 - 3, x0 + colW - 10, y0 + itemH - 4, fill=TILE_BLANK, outline=GRAY, width=1, dash=(4, 4))
@@ -1445,7 +1985,7 @@ class Main8PuzzleApp:
                 if 'UCS' in self.currentAlgoName:
                     c.create_text(tx, y_offset, text=f'Cost: {node.cost}', anchor='nw', fill=ghostClr, font=('Consolas', 8))
                     y_offset += 14
-                elif 'Greedy' in self.currentAlgoName or 'Hill Climbing' in self.currentAlgoName:
+                elif 'Greedy' in self.currentAlgoName or 'Hill Climbing' in self.currentAlgoName or 'Beam Search' in self.currentAlgoName:
                     c.create_text(tx, y_offset, text=f'h(n): {node.h}', anchor='nw', fill=ghostClr, font=('Consolas', 8))
                     y_offset += 14
                 elif 'A*' in self.currentAlgoName or 'IDA*' in self.currentAlgoName:
@@ -1468,7 +2008,7 @@ class Main8PuzzleApp:
                 if 'UCS' in self.currentAlgoName:
                     c.create_text(tx, y_offset, text=f'Cost: {node.cost}', anchor='nw', fill=GREEN, font=('Consolas', 8))
                     y_offset += 14
-                elif 'Greedy' in self.currentAlgoName or 'Hill Climbing' in self.currentAlgoName:
+                elif 'Greedy' in self.currentAlgoName or 'Hill Climbing' in self.currentAlgoName or 'Beam Search' in self.currentAlgoName:
                     c.create_text(tx, y_offset, text=f'h(n): {node.h}', anchor='nw', fill=GREEN, font=('Consolas', 8))
                     y_offset += 14
                 elif 'A*' in self.currentAlgoName or 'IDA*' in self.currentAlgoName:
@@ -1502,7 +2042,7 @@ class Main8PuzzleApp:
 
         for i, node in enumerate(reversed(exploredList)):
             y0 = padY + i * itemH
-            isGoal = (node.state == GOAL_STATE)
+            isGoal = (node.state == self.goalState)
 
             if i > 0:
                 c.create_line(padX, y0 - 4, 260, y0 - 4, fill=BORDER, width=1)
@@ -1522,7 +2062,7 @@ class Main8PuzzleApp:
             if 'UCS' in self.currentAlgoName:
                 c.create_text(tx, y_offset, text=f'Cost: {node.cost}', anchor='nw', fill=GREEN, font=('Consolas', 8))
                 y_offset += 14
-            elif 'Greedy' in self.currentAlgoName or 'Hill Climbing' in self.currentAlgoName:
+            elif 'Greedy' in self.currentAlgoName or 'Hill Climbing' in self.currentAlgoName or 'Beam Search' in self.currentAlgoName:
                 c.create_text(tx, y_offset, text=f'h(n): {node.h}', anchor='nw', fill=GREEN, font=('Consolas', 8))
                 y_offset += 14
             elif 'A*' in self.currentAlgoName or 'IDA*' in self.currentAlgoName:
