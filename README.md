@@ -14,4 +14,6 @@
     - SHC (Simple Hill Climbing)
     - SAHC (Steepest-Ascent Hill Climbing)
     - StHC (Stochastic Hill Climbing)
-
+    - RRHC (Random Restart Hill Climbing)
+- **Nhóm Tìm kiếm Local Beam Search:**
+    - LBS (Local Beam Search)
