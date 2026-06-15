@@ -51,8 +51,12 @@ def generateLabel(idx: int) -> str:
     idx -= 26
     return chr(65 + idx % 26) + str(idx // 26)
 
-def drawBoard(canvas, x, y, state, cell=CELL_SIZE, highlight=None, newCells=None, isGoalState=False):
+def drawBoard(canvas, x, y, state, cell=CELL_SIZE, highlight=None, newCells=None, isGoalState=False, knownCells=None):
     """Draws a 3x3 puzzle board on the canvas."""
+    # Handle Belief State (tuple of states): just draw the first state for the UI
+    if state and isinstance(state[0], tuple) and isinstance(state[0][0], tuple):
+        state = state[0]
+        
     isGhost = (highlight == 'ghost')
     for r in range(3):
         for c in range(3):
@@ -64,6 +68,11 @@ def drawBoard(canvas, x, y, state, cell=CELL_SIZE, highlight=None, newCells=None
                 bg = TILE_BLANK if val == 0 else '#eaeef2'
             elif val == 0:
                 bg = TILE_BLANK
+            elif knownCells is not None:
+                if (r, c) in knownCells:
+                    bg = TILE_GOAL_C if isGoalState else '#007bff'
+                else:
+                    bg = '#ffc107'
             elif isGoalState:
                 bg = TILE_GOAL_C
             elif highlight == 'explored':
@@ -76,10 +85,14 @@ def drawBoard(canvas, x, y, state, cell=CELL_SIZE, highlight=None, newCells=None
             canvas.create_rectangle(cx, cy, cx + cell - 1, cy + cell - 1, fill=bg, outline=BORDER, width=1)
             
             if val != 0:
-                fgColor = '#8c959f' if isGhost or highlight == 'explored' else WHITE
-                if isGhost or highlight == 'explored':
-                    fgColor = BLACK
-                canvas.create_text(cx + cell // 2, cy + cell // 2, text=str(val), fill=fgColor, font=('Segoe UI', 7, 'bold'))
+                if bg in ['#007bff', TILE_GOAL_C]:
+                    fg = WHITE
+                elif bg == '#ffc107':
+                    fg = BLACK
+                else:
+                    fg = GRAY if isGhost else BLACK
+                fontSize = max(7, cell // 2 - 2)
+                canvas.create_text(cx + cell // 2, cy + cell // 2, text=str(val), fill=fg, font=('Segoe UI', fontSize, 'bold'))
 
 @functools.lru_cache(maxsize=8192)
 def calculateManhattanDistance(state, goalState) -> int:
@@ -144,7 +157,7 @@ class NodeInfo:
 
 class StepInfo:
     """Represents a snapshot of the algorithm at a single step."""
-    def __init__(self, phase, currentNode, frontier, explored, newLabels, desc, limit=None, exploredCount=None):
+    def __init__(self, phase, currentNode, frontier, explored, newLabels, desc, limit=None, exploredCount=None, known_positions=None):
         self.phase = phase           # 'init' | 'expand' | 'found' | 'failure' | 'cutoff' | 'new_limit'
         self.currentNode = currentNode    
         self.frontier = frontier        
@@ -153,6 +166,7 @@ class StepInfo:
         self.desc = desc
         self.limit = limit              # Used by IDS
         self.exploredCount = exploredCount # Used by DFS/IDS to refer to master explored list
+        self.known_positions = known_positions
 
 def hasCycle(node: NodeInfo) -> bool:
     """Returns True if the node's state exists in its parent ancestry."""
@@ -644,6 +658,162 @@ class SearchEngine:
         descFail = "Thất bại:\n👉 FRONTIER rỗng mà không tìm thấy Goal."
         steps.append(StepInfo('failure', None, [], list(reached.values()), set(), descFail))
         return steps, list(reached.values())
+
+    @staticmethod
+    def runMultiStartAStar(initials: list[tuple], goal: tuple) -> tuple[list[StepInfo], list[NodeInfo]]:
+        goalTuple = tuple(tuple(r) for r in goal)
+        joint_actions = []
+        
+        # Greedy helper for a single board
+        def solve_single(start_state, goal_state):
+            if start_state == goal_state:
+                return []
+            
+            # queue element: (h, state, path)
+            queue = [(calculateManhattanDistance(start_state, goal_state), start_state, [])]
+            visited = {start_state}
+            
+            while queue:
+                queue.sort(key=lambda x: x[0])
+                h, curr, path = queue.pop(0)
+                
+                if curr == goal_state:
+                    return path
+                    
+                for dirName, dr, dc in MOVE_DIRS:
+                    next_s = applyMove(curr, dirName)
+                    if next_s is not None and next_s not in visited:
+                        visited.add(next_s)
+                        new_path = path + [dirName]
+                        next_h = calculateManhattanDistance(next_s, goal_state)
+                        queue.append((next_h, next_s, new_path))
+            return []
+
+        # Try to find the joint path of actions using a joint Greedy Search (optimizing the sum of h(n) of all boards)
+        # We limit the search to 10000 expanded nodes to prevent UI freeze.
+        # If it fails or hits the limit, we fall back to the sequential greedy solver.
+        
+        k = len(initials)
+        # queue element: (h_total, g, joint_state, path, reached_steps)
+        # reached_steps[j] stores the step index where board j first reached Goal (None if not yet)
+        start_reached = tuple(0 if s == goalTuple else None for s in initials)
+        start_h = sum(0 if s == goalTuple else calculateManhattanDistance(s, goalTuple) for s in initials)
+        
+        queue = [(start_h, 0, tuple(initials), [], start_reached)]
+        visited = {tuple(initials)}
+        
+        joint_actions = None
+        nodes_expanded = 0
+        max_nodes = 10000
+        
+        while queue and nodes_expanded < max_nodes:
+            h_total, g, curr_states, path, reached = heapq.heappop(queue)
+            nodes_expanded += 1
+            
+            if all(s == goalTuple for s in curr_states):
+                joint_actions = path
+                break
+                
+            for move, _, _ in MOVE_DIRS:
+                next_states = []
+                next_reached = list(reached)
+                for j in range(k):
+                    s = curr_states[j]
+                    if s == goalTuple:
+                        next_states.append(s)
+                    else:
+                        nxt = applyMove(s, move)
+                        if nxt is not None:
+                            next_states.append(nxt)
+                            if nxt == goalTuple:
+                                next_reached[j] = g + 1
+                        else:
+                            next_states.append(s)
+                
+                next_states_tuple = tuple(next_states)
+                if next_states_tuple not in visited:
+                    visited.add(next_states_tuple)
+                    
+                    next_h = 0
+                    for j in range(k):
+                        s = next_states_tuple[j]
+                        if next_reached[j] is None:
+                            next_h += calculateManhattanDistance(s, goalTuple)
+                            
+                    heapq.heappush(queue, (next_h, g + 1, next_states_tuple, path + [move], tuple(next_reached)))
+                    
+        if joint_actions is None:
+            # Fallback to sequential greedy solver
+            joint_actions = []
+            for j in range(len(initials)):
+                board_state = initials[j]
+                for act in joint_actions:
+                    if board_state == goalTuple:
+                        break
+                    next_s = applyMove(board_state, act)
+                    if next_s is not None:
+                        board_state = next_s
+                
+                if board_state != goalTuple:
+                    path = solve_single(board_state, goalTuple)
+                    joint_actions.extend(path)
+                
+        # Let's generate the StepInfo list by simulating the sequence step-by-step
+        steps = []
+        explored = []
+        
+        labelIndex = [0]
+        def createNode(states: tuple, action=None, depth=0, parentNode=None):
+            parentLabel = parentNode.label if parentNode else None
+            n = NodeInfo(states, action, depth, 0, parentLabel, generateLabel(labelIndex[0]), parent=parentNode)
+            sum_h = 0
+            for s in states:
+                if s != goalTuple:
+                    sum_h += calculateManhattanDistance(s, goalTuple)
+            n.h = sum_h
+            n.cost = sum_h # For Greedy Search, cost is just h(n)
+            labelIndex[0] += 1
+            return n
+
+        curr_states_tuple = tuple(initials)
+        curr_node = createNode(curr_states_tuple)
+        curr_node.g = 0
+        curr_node.cost = curr_node.h
+        
+        descInit = f"Khởi tạo Multi-Start Greedy:\n👉 Tìm thấy chuỗi hành động tối ưu giải tất cả các bảng.\n👉 Chuỗi nước đi chung gồm {len(joint_actions)} bước."
+        steps.append(StepInfo('init', curr_node, [curr_node], [], {curr_node.label}, descInit))
+        
+        for idx, act in enumerate(joint_actions):
+            explored.append(curr_node)
+            next_states = []
+            for s in curr_node.state:
+                if s == goalTuple:
+                    next_states.append(s)
+                else:
+                    child_s = applyMove(s, act)
+                    if child_s is not None:
+                        next_states.append(child_s)
+                    else:
+                        next_states.append(s)
+            
+            next_states_tuple = tuple(next_states)
+            next_node = createNode(next_states_tuple, act, curr_node.depth + 1, curr_node)
+            next_node.g = curr_node.g + 1
+            next_node.cost = next_node.h
+            
+            is_last = (idx == len(joint_actions) - 1)
+            phase = 'found' if is_last else 'expand'
+            
+            active_count = sum(1 for s in next_states_tuple if s != goalTuple)
+            if phase == 'found':
+                desc = f"Bước {idx+1} - Di chuyển {ARROW_MAP.get(act, act)}:\n👉 Tất cả các bảng đã đạt GOAL thành công!"
+            else:
+                desc = f"Bước {idx+1} - Di chuyển {ARROW_MAP.get(act, act)}:\n👉 Còn {active_count} bảng chưa đạt Goal. Tiếp tục di chuyển..."
+                
+            steps.append(StepInfo(phase, next_node, [next_node], list(explored), {next_node.label}, desc))
+            curr_node = next_node
+            
+        return steps, explored
 
     @staticmethod
     def runSimpleHillClimbing(initial: tuple, goal: tuple) -> tuple[list[StepInfo], list[NodeInfo]]:
@@ -1192,6 +1362,248 @@ class SearchEngine:
         steps.append(StepInfo('failure', None, [], [], set(), descMax, limit=limit, exploredCount=len(exploredMaster)))
         return steps, exploredMaster
 
+    @staticmethod
+    def runAndOrSearch(initial: tuple, goal: tuple) -> tuple[list[StepInfo], list[NodeInfo]]:
+        """Performs a simplified AND-OR search with non-deterministic actions (intended move + 1 slip)."""
+        goalTuple = tuple(tuple(r) for r in goal)
+        labelIndex = [0]
+        steps = []
+        exploredList = []
+        
+        def createNode(state, action=None, depth=0, parentNode=None):
+            parentLabel = parentNode.label if parentNode else None
+            n = NodeInfo(state, action, depth, 0, parentLabel, generateLabel(labelIndex[0]), parent=parentNode)
+            n.h = calculateManhattanDistance(state, goalTuple)
+            labelIndex[0] += 1
+            return n
+
+        startNode = createNode(initial)
+        frontier = [startNode]
+        reached = {initial: startNode}
+        
+        descInit = "Khởi tạo AND-OR Search:\n👉 Môi trường không tất định: 1 hành động có thể sinh ra nhiều kết quả (có rủi ro bị trượt)."
+        steps.append(StepInfo('init', startNode, list(frontier), list(exploredList), {startNode.label}, descInit))
+        
+        while frontier:
+            node = frontier.pop(0)
+            exploredList.append(node)
+            
+            if node.state == goalTuple:
+                descFound = f"Tìm thấy Goal tại Node [{node.label}].\n👉 Trong mô hình AND-OR, nhánh này đã được giải quyết thành công."
+                steps.append(StepInfo('found', node, list(frontier), list(exploredList), set(), descFound))
+                return steps, exploredList
+                
+            newLabels = set()
+            for i, (dirName, dr, dc) in enumerate(MOVE_DIRS):
+                outcomes = []
+                intended = applyMove(node.state, dirName)
+                if intended: outcomes.append(intended)
+                
+                # Introduce non-determinism: possible slip to the next orthogonal direction
+                slipDir = MOVE_DIRS[(i + 1) % 4][0]
+                slip = applyMove(node.state, slipDir)
+                if slip and slip != intended:
+                    outcomes.append(slip)
+                
+                if outcomes:
+                    for out_state in outcomes:
+                        if out_state not in reached:
+                            child = createNode(out_state, dirName, node.depth + 1, node)
+                            reached[out_state] = child
+                            frontier.append(child)
+                            newLabels.add(child.label)
+            
+            descExp = f"Mở rộng Node [{node.label}] với môi trường không tất định:\n👉 Một số hành động bị trượt sinh ra thêm trạng thái ngoài ý muốn.\n👉 Tổng {len(newLabels)} trạng thái kết quả (OR-nodes)."
+            steps.append(StepInfo('expand', node, list(frontier), list(exploredList), newLabels, descExp))
+            
+            if len(exploredList) > 500: # Limit to avoid infinite loops
+                break
+                
+        descFail = "Thất bại: Không tìm được giải pháp khả thi an toàn trong không gian hữu hạn."
+        steps.append(StepInfo('failure', None, [], list(exploredList), set(), descFail))
+        return steps, exploredList
+
+    @staticmethod
+    def runSensorlessSearch(initial: tuple, goal: tuple) -> tuple[list[StepInfo], list[NodeInfo]]:
+        """Searching with no observation (Sensorless), working purely in Belief Space."""
+        goalTuple = tuple(tuple(r) for r in goal)
+        labelIndex = [0]
+        steps = []
+        exploredList = []
+        
+        def createNode(states: tuple, action=None, depth=0, parentNode=None):
+            parentLabel = parentNode.label if parentNode else None
+            n = NodeInfo(states, action, depth, 0, parentLabel, generateLabel(labelIndex[0]), parent=parentNode)
+            n.h = min(calculateManhattanDistance(s, goalTuple) for s in states)
+            labelIndex[0] += 1
+            return n
+
+        # Initial BS has 3 random states
+        initial_states = [initial]
+        while len(initial_states) < 3:
+            rand_s = generateRandomSolvableState(goalTuple)
+            if rand_s not in initial_states:
+                initial_states.append(rand_s)
+                
+        # GS has 3 random states
+        goal_states = [goalTuple]
+        while len(goal_states) < 3:
+            rand_g = generateRandomSolvableState(initial_states[0])
+            if rand_g not in goal_states:
+                goal_states.append(rand_g)
+                
+        startBS = tuple(initial_states)
+        startNode = createNode(startBS)
+        
+        frontier = [startNode]
+        reached = {frozenset(startBS)}
+        
+        descInit = f"Khởi tạo Sensorless Search:\n👉 Belief State (BS) ban đầu: 3 trạng thái ngẫu nhiên.\n👉 Goal State (GS): 3 trạng thái ngẫu nhiên."
+        steps.append(StepInfo('init', startNode, list(frontier), list(exploredList), {startNode.label}, descInit))
+        
+        # We attach metadata to the steps for the UI to consume
+        for s in steps:
+            setattr(s, 'goal_states', goal_states)
+        
+        while frontier:
+            node = frontier.pop(0)
+            exploredList.append(node)
+            
+            # Goal check: if ANY state in current BS matches ANY state in GS
+            if any(s in goal_states for s in node.state):
+                descFound = f"Tìm thấy Goal tại Belief State [{node.label}]!\n👉 Ít nhất 1 trạng thái thực tế trong BS đã khớp với tập Goal State."
+                steps.append(StepInfo('found', node, list(frontier), list(exploredList), set(), descFound))
+                return steps, exploredList
+                
+            newLabels = set()
+            for dirName, dr, dc in MOVE_DIRS:
+                next_states = []
+                for s in node.state:
+                    nxt = applyMove(s, dirName)
+                    if nxt is not None:
+                        next_states.append(nxt)
+                    else:
+                        next_states.append(s)
+                next_bs = tuple(next_states) # Keep exact order for UI
+                fs_bs = frozenset(next_bs)
+                
+                if fs_bs not in reached:
+                    child = createNode(next_bs, dirName, node.depth + 1, node)
+                    reached.add(fs_bs)
+                    frontier.append(child)
+                    newLabels.add(child.label)
+                    
+            descExp = f"Mở rộng Belief State [{node.label}]:\n👉 Áp dụng 4 hành động mù (Sensorless) lên toàn bộ các trạng thái trong BS."
+            steps.append(StepInfo('expand', node, list(frontier), list(exploredList), newLabels, descExp))
+            
+            if len(exploredList) > 500:
+                break
+                
+        descFail = "Thất bại: Đã duyệt quá giới hạn không gian Belief State."
+        steps.append(StepInfo('failure', None, [], list(exploredList), set(), descFail))
+        return steps, exploredList
+
+    @staticmethod
+    def runPartiallyObservableSearch(initial: tuple, goal: tuple) -> tuple[list[StepInfo], list[NodeInfo]]:
+        """Searching for partially observable problems."""
+        goalTuple = tuple(tuple(r) for r in goal)
+        labelIndex = [0]
+        steps = []
+        exploredList = []
+        
+        def createNode(states: tuple, action=None, depth=0, parentNode=None):
+            parentLabel = parentNode.label if parentNode else None
+            n = NodeInfo(states, action, depth, 0, parentLabel, generateLabel(labelIndex[0]), parent=parentNode)
+            n.h = min(calculateManhattanDistance(s, goalTuple) for s in states)
+            labelIndex[0] += 1
+            return n
+
+        num_known = random.randint(1, 5)
+        positions = [(r, c) for r in range(3) for c in range(3)]
+        known_positions = random.sample(positions, num_known)
+        
+        def get_all_matching_solvable_states(base_state, known_pos):
+            import itertools
+            flat_base = [val for row in base_state for val in row]
+            known_indices = [r * 3 + c for r, c in known_pos]
+            unknown_indices = [i for i in range(9) if i not in known_indices]
+            unknown_vals = [flat_base[i] for i in unknown_indices]
+            
+            base_inv = sum(1 for i in range(9) for j in range(i+1, 9) if flat_base[i] and flat_base[j] and flat_base[i] > flat_base[j])
+            
+            matching = []
+            for p in itertools.permutations(unknown_vals):
+                new_flat = list(flat_base)
+                for idx, val in zip(unknown_indices, p):
+                    new_flat[idx] = val
+                    
+                inv = sum(1 for i in range(9) for j in range(i+1, 9) if new_flat[i] and new_flat[j] and new_flat[i] > new_flat[j])
+                if inv % 2 == base_inv % 2:
+                    new_state = tuple(tuple(new_flat[r*3:(r+1)*3]) for r in range(3))
+                    matching.append(new_state)
+            return matching
+
+        all_initial = get_all_matching_solvable_states(initial, known_positions)
+        initial_states = random.sample(all_initial, min(3, len(all_initial)))
+        if initial not in initial_states:
+            initial_states[0] = initial
+            
+        all_goal = get_all_matching_solvable_states(goalTuple, known_positions)
+        goal_states = random.sample(all_goal, min(3, len(all_goal)))
+        if goalTuple not in goal_states:
+            goal_states[0] = goalTuple
+                
+        startBS = tuple(initial_states)
+        startNode = createNode(startBS)
+        
+        frontier = [startNode]
+        reached = {frozenset(startBS)}
+        
+        descInit = f"Khởi tạo Partially Observable Search:\n👉 Quan sát được {num_known} ô.\n👉 Lấy ngẫu nhiên các BS và GS (3 trạng thái) tương ứng với ô đúng."
+        steps.append(StepInfo('init', startNode, list(frontier), list(exploredList), {startNode.label}, descInit, known_positions=known_positions))
+        
+        for s in steps:
+            setattr(s, 'goal_states', goal_states)
+            s.known_positions = known_positions
+        
+        while frontier:
+            node = frontier.pop(0)
+            exploredList.append(node)
+            
+            if any(s in goal_states for s in node.state):
+                descFound = f"Tìm thấy Goal tại Belief State [{node.label}]!\n👉 Đã đạt trạng thái mong đợi nhờ thông tin quan sát từng phần."
+                steps.append(StepInfo('found', node, list(frontier), list(exploredList), set(), descFound, known_positions=known_positions))
+                return steps, exploredList
+                
+            newLabels = set()
+            for dirName, dr, dc in MOVE_DIRS:
+                next_states = []
+                for s in node.state:
+                    nxt = applyMove(s, dirName)
+                    if nxt is not None:
+                        next_states.append(nxt)
+                    else:
+                        next_states.append(s)
+                
+                next_bs = tuple(next_states) # Keep exact order for UI
+                fs_bs = frozenset(next_bs)
+                
+                if fs_bs not in reached:
+                    child = createNode(next_bs, dirName, node.depth + 1, node)
+                    reached.add(fs_bs)
+                    frontier.append(child)
+                    newLabels.add(child.label)
+                    
+            descExp = f"Mở rộng Belief State [{node.label}] có quan sát:\n👉 Tính toán trạng thái kết quả dựa trên các thông tin đã lọc."
+            steps.append(StepInfo('expand', node, list(frontier), list(exploredList), newLabels, descExp, known_positions=known_positions))
+            
+            if len(exploredList) > 500:
+                break
+                
+        descFail = "Thất bại: Không tìm được giải pháp với các ràng buộc quan sát hiện tại."
+        steps.append(StepInfo('failure', None, [], list(exploredList), set(), descFail, known_positions=known_positions))
+        return steps, exploredList
+
 # ══════════════════════════════════════════════════
 # 5. GIAO DIỆN & ỨNG DỤNG (UI/UX & APPLICATION)
 # ══════════════════════════════════════════════════
@@ -1216,7 +1628,11 @@ class Main8PuzzleApp:
             'Steepest-Ascent Hill Climbing (SAHC)': SearchEngine.runSteepestAscentHillClimbing,
             'Stochastic Hill Climbing (StHC)': SearchEngine.runStochasticHillClimbing,
             'Random Restart Hill Climbing (RRHC)': SearchEngine.runRandomRestartHillClimbing,
-            'Local Beam Search (LBS)': SearchEngine.runLocalBeamSearch
+            'Local Beam Search (LBS)': SearchEngine.runLocalBeamSearch,
+            'AND-OR search': SearchEngine.runAndOrSearch,
+            'Searching with no observation': SearchEngine.runSensorlessSearch,
+            'Searching for partially observable problems': SearchEngine.runPartiallyObservableSearch,
+            'Multi-Start Greedy Search': None
         }
         self.algoGroups = {
             'Uninformed Search': [
@@ -1238,6 +1654,14 @@ class Main8PuzzleApp:
             ],
             'Local Beam Search': [
                 'Local Beam Search (LBS)'
+            ],
+            'Searching in complex environments': [
+                'AND-OR search',
+                'Searching with no observation',
+                'Searching for partially observable problems'
+            ],
+            'Multi Start State': [
+                'Multi-Start Greedy Search'
             ]
         }
         self.currentGroupName = 'Uninformed Search'
@@ -1254,17 +1678,38 @@ class Main8PuzzleApp:
         self._loadAlgorithm(self.currentAlgoName)
 
     def _loadAlgorithm(self, algoName: str) -> None:
+        if algoName == 'Multi-Start Greedy Search':
+            self._loadMultiStartSearch()
+            return
+            
         algoFunc = self.algorithms[algoName]
         self.steps, self.exploredMaster = algoFunc(self.startState, self.goalState)
         self.idx = 0
         self._stopAuto()
         self.algoTitleVar.set(f'8-Puzzle — {algoName}')
+        
+        if len(self.steps) > 0 and hasattr(self.steps[0], 'goal_states'):
+            self.currentGoalStates = self.steps[0].goal_states
+        else:
+            self.currentGoalStates = [self.goalState]
+        self._drawGoalBoard()
+        
         self._render(0)
 
     def _drawGoalBoard(self) -> None:
         """Draws the goal board canvas with the current goalState configuration."""
+        if not hasattr(self, 'goalCanvas'): return
         self.goalCanvas.delete('all')
-        drawBoard(self.goalCanvas, 10, 10, self.goalState, cell=43, isGoalState=True)
+        known = getattr(self.steps[0], 'known_positions', None) if self.steps else None
+        
+        if hasattr(self, 'currentGoalStates') and len(self.currentGoalStates) > 1:
+            goals = tuple(self.currentGoalStates)
+            self.goalCanvas.config(width=20 + len(goals) * 110, height=130)
+            for i, s in enumerate(goals):
+                drawBoard(self.goalCanvas, 10 + i * 110, 10, s, cell=33, isGoalState=True, knownCells=known)
+        else:
+            self.goalCanvas.config(width=150, height=150)
+            drawBoard(self.goalCanvas, 10, 10, self.goalState, cell=43, isGoalState=True, knownCells=known)
 
     def _openCustomStatesDialog(self) -> None:
         """Opens a popup dialog to enter custom Start and Goal states."""
@@ -1458,6 +1903,224 @@ class Main8PuzzleApp:
         tk.Button(btnFrame, text="Lưu cấu hình", command=validateAndSave, bg=GREEN, fg=WHITE, **bs).pack(side='left', padx=10)
         tk.Button(btnFrame, text="Hủy bỏ", command=dialog.destroy, bg='#eaeef2', fg=BLACK, **bs).pack(side='left', padx=10)
 
+    def _onKChange(self, event: tk.Event) -> None:
+        self._stopAuto()
+        self._randomizeMultiStates()
+
+    def _randomizeMultiStates(self) -> None:
+        self._stopAuto()
+        k = int(self.comboK.get())
+        
+        states = []
+        attempts = 0
+        while len(states) < k and attempts < 100:
+            s = generateRandomSolvableState(self.goalState, moves=10)
+            if s not in states:
+                states.append(s)
+            attempts += 1
+        while len(states) < k:
+            states.append(generateRandomSolvableState(self.goalState, moves=10))
+            
+        self.multiStartStates = states
+        self._rebuildMultiStartPanels()
+        
+        for j in range(k):
+            canvas = self.multiStartInitialCanvases[j]
+            canvas.delete('all')
+            drawBoard(canvas, 2, 2, self.multiStartStates[j], cell=12, isGoalState=False)
+            
+        self._loadMultiStartSearch()
+
+    def _rebuildMultiStartPanels(self):
+        for child in self.multiStartCol.winfo_children():
+            child.destroy()
+            
+        self.multiStartCanvases = []
+        self.multiStartStatusLabels = []
+        self.multiStartInitialCanvases = []
+        self.multiStartPathLabels = []
+        
+        k = int(self.comboK.get())
+        
+        # If k <= 5: 1 row, cell size 50
+        # If k > 5: 2 rows of max 5 columns, cell size 32
+        if k <= 5:
+            cell = 50
+        else:
+            cell = 32
+            
+        canvas_w = cell * 3 + 20
+        canvas_h = cell * 3 + 20
+        
+        # Configure row configurations
+        self.multiStartCol.grid_rowconfigure(0, weight=1)
+        if k > 5:
+            self.multiStartCol.grid_rowconfigure(1, weight=1)
+        else:
+            self.multiStartCol.grid_rowconfigure(1, weight=0)
+            
+        max_cols = 5 if k > 5 else k
+        for col_idx in range(max_cols):
+            self.multiStartCol.grid_columnconfigure(col_idx, weight=1)
+        for col_idx in range(max_cols, 10):
+            self.multiStartCol.grid_columnconfigure(col_idx, weight=0)
+        
+        for j in range(k):
+            row = j // 5 if k > 5 else 0
+            col = j % 5 if k > 5 else j
+            
+            colFrame = tk.Frame(self.multiStartCol, bg=BG, highlightthickness=1, highlightbackground=BORDER)
+            colFrame.grid(row=row, column=col, padx=4, pady=4, sticky='nsew')
+            
+            titleLbl = tk.Label(colFrame, text=f"STATE {j+1}", font=('Segoe UI', 9, 'bold'), bg=PANEL, fg=BLACK)
+            titleLbl.pack(fill='x', ipady=4)
+            tk.Frame(colFrame, bg=BORDER, height=1).pack(fill='x')
+            
+            statusLbl = tk.Label(colFrame, text="Đang giải", font=('Segoe UI', 8, 'bold'), bg=BG, fg=ORANGE)
+            statusLbl.pack(pady=(6, 2))
+            self.multiStartStatusLabels.append(statusLbl)
+            
+            canvas = tk.Canvas(colFrame, width=canvas_w, height=canvas_h, bg=BG, highlightthickness=0)
+            canvas.pack(pady=2)
+            self.multiStartCanvases.append(canvas)
+            
+            tk.Frame(colFrame, bg=BORDER, height=1).pack(fill='x', pady=6)
+            
+            pathLbl = tk.Label(colFrame, text="Đường đi: —", font=('Segoe UI', 8), bg=BG, fg=GRAY, wraplength=170)
+            pathLbl.pack(pady=2)
+            self.multiStartPathLabels.append(pathLbl)
+            
+            initFrame = tk.Frame(colFrame, bg=BG)
+            initFrame.pack(pady=(4, 6))
+            
+            tk.Label(initFrame, text="Bắt đầu:", font=('Segoe UI', 8, 'italic'), bg=BG, fg=GRAY).pack(side='left', padx=(0, 4))
+            
+            initCanvas = tk.Canvas(initFrame, width=40, height=40, bg=BG, highlightthickness=0)
+            initCanvas.pack(side='left')
+            self.multiStartInitialCanvases.append(initCanvas)
+
+    def _loadMultiStartSearch(self) -> None:
+        self.steps, self.exploredMaster = SearchEngine.runMultiStartAStar(self.multiStartStates, self.goalState)
+        self.idx = 0
+        self.algoTitleVar.set(f'8-Puzzle — Multi-Start Greedy (k={len(self.multiStartStates)})')
+        self._render(0)
+
+    def _updateLayoutForGroup(self, groupName: str) -> None:
+        if groupName == 'Multi Start State':
+            self.leftCol.pack_forget()
+            self.frontierCol.pack_forget()
+            self.exploredCol.pack_forget()
+            
+            if hasattr(self, 'btnCustomStates'):
+                self.btnCustomStates.grid_forget()
+            if hasattr(self, 'multiStartCtrlFrame'):
+                self.multiStartCtrlFrame.pack(side='left', padx=10)
+                
+            self.multiStartCol.pack(side='left', fill='both', expand=True, pady=(0, 8))
+            
+            k = int(self.comboK.get())
+            if not hasattr(self, 'multiStartStates') or len(self.multiStartStates) != k:
+                self._randomizeMultiStates()
+            else:
+                self._rebuildMultiStartPanels()
+                for j in range(k):
+                    canvas = self.multiStartInitialCanvases[j]
+                    canvas.delete('all')
+                    drawBoard(canvas, 2, 2, self.multiStartStates[j], cell=12, isGoalState=False)
+                self._loadMultiStartSearch()
+        else:
+            if hasattr(self, 'multiStartCol'):
+                self.multiStartCol.pack_forget()
+            if hasattr(self, 'multiStartCtrlFrame'):
+                self.multiStartCtrlFrame.pack_forget()
+                
+            if hasattr(self, 'leftCol'):
+                self.leftCol.pack(side='left', fill='y', padx=(0, 8))
+            if hasattr(self, 'frontierCol'):
+                self.frontierCol.pack(side='left', fill='both', expand=True, padx=(0, 8), pady=(0, 8))
+            if hasattr(self, 'exploredCol'):
+                self.exploredCol.pack(side='left', fill='y', pady=(0, 8))
+                
+            if hasattr(self, 'btnCustomStates'):
+                self.btnCustomStates.grid(row=0, column=6, padx=8)
+                
+            self._loadAlgorithm(self.currentAlgoName)
+
+    def _renderMultiStart(self, step):
+        phaseCfg = {
+            'init':      (ACCENT, WHITE, '🔵', 'INIT'),
+            'new_limit': (PURPLE, WHITE, '🟣', 'NEW LIMIT'),
+            'restart':   (PURPLE, WHITE, '🟣', 'RESTART'),
+            'expand':    (ORANGE, WHITE, '🟠', 'EXPAND'),
+            'found':     (GREEN,  WHITE, '🟢', 'FOUND'),
+            'cutoff':    ('#e3b341', BLACK, '🟡', 'CUTOFF'),
+            'failure':   (RED,    WHITE, '🔴', 'FAIL'),
+        }
+        pc, fc, icon, badgeTxt = phaseCfg.get(step.phase, (GRAY, WHITE, '⬤', '?'))
+        self.phaseIcon.config(text=icon, fg=pc)
+        self.phaseBadge.config(text=badgeTxt, bg=pc, fg=fc)
+        self.descLbl.config(text=step.desc)
+        self.stepLbl.config(text=f'Bước {self.idx} / {len(self.steps) - 1}')
+        
+        self.detailCanvas.delete('all')
+        if step.phase == 'expand' and step.newLabels:
+            self.detailCanvas.create_text(10, 40, text=f"Sinh {len(step.newLabels)} Node con mới trong Frontier", font=('Segoe UI', 10, 'bold'), fill=BLACK, anchor='w')
+            
+        k = len(self.multiStartStates)
+        node = step.currentNode
+        
+        cell = 50 if k <= 5 else 32
+            
+        for j in range(k):
+            canvas = self.multiStartCanvases[j]
+            statusLbl = self.multiStartStatusLabels[j]
+            pathLbl = self.multiStartPathLabels[j]
+            
+            if node and node.state and j < len(node.state):
+                board_state = node.state[j]
+                # Calculate g_val
+                if board_state == self.goalState:
+                    curr = node
+                    while curr.parent and j < len(curr.parent.state) and curr.parent.state[j] == self.goalState:
+                        curr = curr.parent
+                    g_val = curr.depth
+                else:
+                    g_val = node.depth
+            else:
+                board_state = self.multiStartStates[j]
+                g_val = 0
+                
+            isGoal = (board_state == self.goalState)
+            
+            canvas.delete('all')
+            drawBoard(canvas, 10, 10, board_state, cell=cell, isGoalState=isGoal)
+            
+            manh = calculateManhattanDistance(board_state, self.goalState)
+            
+            if isGoal:
+                statusLbl.config(text=f"✓ ĐẠT GOAL (bước {g_val})\nh(n) = 0", fg=GREEN)
+            else:
+                statusLbl.config(text=f"⚡ ĐANG GIẢI\nh(n) = {manh}", fg=ORANGE)
+                
+            actions = []
+            curr = node
+            while curr and curr.parent:
+                if curr.state and curr.parent.state:
+                    board_state_curr = curr.state[j]
+                    board_state_parent = curr.parent.state[j]
+                    if board_state_curr != board_state_parent:
+                        actions.append(curr.action)
+                curr = curr.parent
+            actions.reverse()
+            
+            if actions:
+                path_str = " ➔ ".join(actions)
+                if len(path_str) > 30:
+                    path_str = "..." + path_str[-28:]
+                pathLbl.config(text=f"Đường đi: {path_str}", fg=GRAY)
+            else:
+                pathLbl.config(text="Đường đi: —", fg=GRAY)
+
     def _onAlgoChange(self, event: tk.Event) -> None:
         newAlgo = self.comboAlgo.get()
         if newAlgo == self.currentAlgoName:
@@ -1482,7 +2145,7 @@ class Main8PuzzleApp:
         
         if self.idx > 0 or self.autoMode:
             self._stopAuto()
-            ans = messagebox.askyesno("Đổi nhóm thuật toán", "Thuật toán đang chạy. Bạn có muốn Reset để chuyển sang nhóm mới không?\n(Đồng ý = Reset, Hủy = Tiếp tục nhóm hiện tại)")
+            ans = messagebox.askyesno("Đổi nhóm thuật toán", "Thuật toán đang chạy. Bạn có muốn Reset để chuyển sang nhóm mới không?\n(Đòng ý = Reset, Hủy = Tiếp tục nhóm hiện tại)")
             if not ans:
                 self.comboGroup.set(self.currentGroupName)
                 return
@@ -1494,7 +2157,7 @@ class Main8PuzzleApp:
         firstAlgo = algosInGroup[0]
         self.comboAlgo.set(firstAlgo)
         self.currentAlgoName = firstAlgo
-        self._loadAlgorithm(firstAlgo)
+        self._updateLayoutForGroup(newGroup)
 
     def _buildUi(self):
         # ── Top Section (Header + Controls) ──
@@ -1531,13 +2194,26 @@ class Main8PuzzleApp:
         self.comboAlgo.bind('<<ComboboxSelected>>', self._onAlgoChange)
         self.comboAlgo.pack(side='left')
 
+        # Buttons style config
+        bs = dict(font=('Segoe UI', 9, 'bold'), relief='flat', cursor='hand2', padx=8, pady=3, bd=0)
+
+        # Multi-Start controls (hidden by default)
+        self.multiStartCtrlFrame = tk.Frame(toolbarFrame, bg=PANEL)
+        
+        tk.Label(self.multiStartCtrlFrame, text='k Start States:', font=('Segoe UI', 9, 'bold'), bg=PANEL, fg=GRAY).pack(side='left', padx=(10, 4))
+        self.comboK = ttk.Combobox(self.multiStartCtrlFrame, values=[str(i) for i in range(2, 11)], state='readonly', width=5, font=('Segoe UI', 9))
+        self.comboK.set('3')
+        self.comboK.bind('<<ComboboxSelected>>', self._onKChange)
+        self.comboK.pack(side='left', padx=(0, 10))
+        
+        self.btnRandomMulti = tk.Button(self.multiStartCtrlFrame, text='🎲 Randomize', command=self._randomizeMultiStates, bg=ACCENT, fg=WHITE, **bs)
+        self.btnRandomMulti.pack(side='left', padx=(0, 10))
+
         # Right subframe: Buttons + Speed
         rightCtrlFrame = tk.Frame(toolbarFrame, bg=PANEL)
         rightCtrlFrame.pack(side='right', padx=10)
 
         # Buttons
-        bs = dict(font=('Segoe UI', 9, 'bold'), relief='flat', cursor='hand2', padx=8, pady=3, bd=0)
-        
         btnFrame = tk.Frame(rightCtrlFrame, bg=PANEL)
         btnFrame.pack(side='left', padx=(0, 10))
 
@@ -1548,7 +2224,8 @@ class Main8PuzzleApp:
         tk.Button(btnFrame, text='Tiếp ▶', command=self._goNext, bg='#eaeef2', fg=BLACK, **bs).grid(row=0, column=3, padx=2)
         tk.Button(btnFrame, text='⏭', command=self._goLast, bg='#eaeef2', fg=BLACK, **bs).grid(row=0, column=4, padx=2)
         tk.Button(btnFrame, text='🛣 Show Path', command=self._showPath, bg=PURPLE, fg=WHITE, **bs).grid(row=0, column=5, padx=8)
-        tk.Button(btnFrame, text='✏️ Custom States', command=self._openCustomStatesDialog, bg=GRAY, fg=WHITE, **bs).grid(row=0, column=6, padx=8)
+        self.btnCustomStates = tk.Button(btnFrame, text='✏️ Custom States', command=self._openCustomStatesDialog, bg=GRAY, fg=WHITE, **bs)
+        self.btnCustomStates.grid(row=0, column=6, padx=8)
 
         # Speed scale
         speedFrame = tk.Frame(rightCtrlFrame, bg=PANEL)
@@ -1556,17 +2233,21 @@ class Main8PuzzleApp:
         tk.Label(speedFrame, text='Tốc độ (ms):', bg=PANEL, fg=GRAY, font=('Segoe UI', 9)).pack(side='left', padx=(0, 4))
         tk.Scale(speedFrame, from_=50, to=1500, orient='horizontal', variable=self.speed, bg=PANEL, fg=BLACK, troughcolor=BORDER, highlightthickness=0, length=90, showvalue=False).pack(side='left')
 
+        # ── Bottom Section (Step Info) ──
+        self._buildBottomBar()
+
         # ── Middle Section (Main Layout) ──
         body = tk.Frame(self.root, bg=BG)
         body.pack(fill='both', expand=True, padx=10, pady=4)
+        self.body = body
 
         # Left Column (Current Node + Goal)
-        leftCol = tk.Frame(body, bg=BG, width=340)
-        leftCol.pack(side='left', fill='y', padx=(0, 8))
-        leftCol.pack_propagate(False)
+        self.leftCol = tk.Frame(body, bg=BG, width=340)
+        self.leftCol.pack(side='left', fill='y', padx=(0, 8))
+        self.leftCol.pack_propagate(False)
 
-        self._buildCurrentNodePanel(leftCol)
-        self._buildGoalPanel(leftCol)
+        self._buildCurrentNodePanel(self.leftCol)
+        self._buildGoalPanel(self.leftCol)
 
         # Center Column (Frontier)
         self._buildFrontierPanel(body)
@@ -1574,8 +2255,8 @@ class Main8PuzzleApp:
         # Right Column (Explored)
         self._buildExploredPanel(body)
 
-        # ── Bottom Section (Step Info) ──
-        self._buildBottomBar()
+        # Multi Start MAIN Column (Hidden initially)
+        self.multiStartCol = tk.Frame(body, bg=BG)
 
     def _panel(self, parent, title):
         f = tk.Frame(parent, bg=BG, highlightthickness=1, highlightbackground=BORDER)
@@ -1609,13 +2290,13 @@ class Main8PuzzleApp:
 
     def _buildFrontierPanel(self, parent):
         self.frontierTitleVar = tk.StringVar(value='Frontier')
-        pnl = tk.Frame(parent, bg=BG, highlightthickness=1, highlightbackground=BORDER)
-        pnl.pack(side='left', fill='both', expand=True, padx=(0, 8), pady=(0, 8))
+        self.frontierCol = tk.Frame(parent, bg=BG, highlightthickness=1, highlightbackground=BORDER)
+        self.frontierCol.pack(side='left', fill='both', expand=True, padx=(0, 8), pady=(0, 8))
         
-        tk.Label(pnl, textvariable=self.frontierTitleVar, bg=PANEL, fg=BLACK, font=('Segoe UI', 10, 'bold')).pack(fill='x', ipady=4)
-        tk.Frame(pnl, bg=BORDER, height=1).pack(fill='x')
+        tk.Label(self.frontierCol, textvariable=self.frontierTitleVar, bg=PANEL, fg=BLACK, font=('Segoe UI', 10, 'bold')).pack(fill='x', ipady=4)
+        tk.Frame(self.frontierCol, bg=BORDER, height=1).pack(fill='x')
 
-        wrapper = tk.Frame(pnl, bg=BG)
+        wrapper = tk.Frame(self.frontierCol, bg=BG)
         wrapper.pack(fill='both', expand=True, padx=4, pady=4)
         vsb = tk.Scrollbar(wrapper, orient='vertical', bg=BG, troughcolor=PANEL, width=10)
         vsb.pack(side='right', fill='y')
@@ -1626,14 +2307,14 @@ class Main8PuzzleApp:
         self.frCanvas.bind('<MouseWheel>', lambda e: self.frCanvas.yview_scroll(-1 * (e.delta // 120), 'units'))
 
     def _buildExploredPanel(self, parent):
-        pnl = tk.Frame(parent, bg=BG, highlightthickness=1, highlightbackground=BORDER, width=280)
-        pnl.pack(side='left', fill='y', pady=(0, 8))
-        pnl.pack_propagate(False)
+        self.exploredCol = tk.Frame(parent, bg=BG, highlightthickness=1, highlightbackground=BORDER, width=280)
+        self.exploredCol.pack(side='left', fill='y', pady=(0, 8))
+        self.exploredCol.pack_propagate(False)
         
-        tk.Label(pnl, text='Explored', bg=PANEL, fg=BLACK, font=('Segoe UI', 10, 'bold')).pack(fill='x', ipady=4)
-        tk.Frame(pnl, bg=BORDER, height=1).pack(fill='x')
+        tk.Label(self.exploredCol, text='Explored', bg=PANEL, fg=BLACK, font=('Segoe UI', 10, 'bold')).pack(fill='x', ipady=4)
+        tk.Frame(self.exploredCol, bg=BORDER, height=1).pack(fill='x')
 
-        wrapper = tk.Frame(pnl, bg=BG)
+        wrapper = tk.Frame(self.exploredCol, bg=BG)
         wrapper.pack(fill='both', expand=True, padx=4, pady=4)
         vsb = tk.Scrollbar(wrapper, orient='vertical', bg=BG, troughcolor=PANEL, width=10)
         vsb.pack(side='right', fill='y')
@@ -1645,7 +2326,7 @@ class Main8PuzzleApp:
 
     def _buildBottomBar(self):
         self.banner = tk.Frame(self.root, bg=PANEL, highlightthickness=1, highlightbackground=BORDER)
-        self.banner.pack(fill='x', padx=10, pady=(0, 10))
+        self.banner.pack(side='bottom', fill='x', padx=10, pady=(0, 10))
 
         bannerInner = tk.Frame(self.banner, bg=PANEL)
         bannerInner.pack(fill='x', padx=14, pady=8)
@@ -1734,51 +2415,94 @@ class Main8PuzzleApp:
         
         top = tk.Toplevel(self.root)
         top.title(f"Đường đi tới Goal ({len(pathNodes)-1} bước)")
-        top.geometry("700x450")
+        
+        isMultiStart = (self.currentGroupName == 'Multi Start State')
+        
+        if isMultiStart:
+            k = len(self.multiStartStates)
+            top.geometry(f"{min(1200, 220 * k + 300)}x500")
+        else:
+            top.geometry("700x450")
+            
         top.configure(bg=BG)
 
-        leftPane = tk.Frame(top, bg=BG, width=300)
-        leftPane.pack(side='left', fill='y', padx=10, pady=10)
-        leftPane.pack_propagate(False)
+        leftPane = tk.Frame(top, bg=BG, width=420 if isMultiStart else 300)
+        leftPane.pack(side='left', fill='both', expand=True, padx=10, pady=10)
         
         tk.Label(leftPane, text="Trạng thái Node", font=('Segoe UI', 11, 'bold'), bg=BG, fg=BLACK).pack(pady=(0, 10))
         
-        canvasLeft = tk.Canvas(leftPane, width=280, height=350, bg=BG, highlightthickness=1, highlightbackground=BORDER)
-        canvasLeft.pack()
+        if isMultiStart:
+            canvasFrame = tk.Frame(leftPane, bg=BG)
+            canvasFrame.pack(fill='both', expand=True)
+            
+            canvases = []
+            k = len(self.multiStartStates)
+            for j in range(k):
+                f = tk.Frame(canvasFrame, bg=BG, highlightthickness=1, highlightbackground=BORDER)
+                f.pack(side='left', fill='both', expand=True, padx=4)
+                tk.Label(f, text=f"Bản đồ {j+1}", font=('Segoe UI', 8, 'bold'), bg=BG, fg=BLACK).pack(pady=2)
+                c = tk.Canvas(f, width=120, height=120, bg=BG, highlightthickness=0)
+                c.pack(padx=4, pady=4, expand=True)
+                canvases.append(c)
+        else:
+            leftPane.pack_propagate(False)
+            canvasLeft = tk.Canvas(leftPane, width=280, height=350, bg=BG, highlightthickness=1, highlightbackground=BORDER)
+            canvasLeft.pack()
 
-        rightPane = tk.Frame(top, bg=BG)
-        rightPane.pack(side='left', fill='both', expand=True, padx=10, pady=10)
+        rightPane = tk.Frame(top, bg=BG, width=280)
+        rightPane.pack(side='right', fill='y', padx=10, pady=10)
+        rightPane.pack_propagate(False)
 
         tk.Label(rightPane, text="Thông tin chi tiết", font=('Segoe UI', 11, 'bold'), bg=BG, fg=BLACK).pack(pady=(0, 10))
         
         detailsFrame = tk.Frame(rightPane, bg=PANEL, highlightthickness=1, highlightbackground=BORDER)
         detailsFrame.pack(fill='both', expand=True)
 
-        infoLbl = tk.Label(detailsFrame, text="", font=('Segoe UI', 10), bg=PANEL, fg=BLACK, justify='left', anchor='nw')
+        infoLbl = tk.Label(detailsFrame, text="", font=('Segoe UI', 10), bg=PANEL, fg=BLACK, justify='left', anchor='nw', wraplength=250)
         infoLbl.pack(padx=15, pady=15, fill='both', expand=True)
 
         currentIdx = [0]
 
         def drawStep(idx):
-            canvasLeft.delete('all')
             node = pathNodes[idx]
             isGoal = (idx == len(pathNodes) - 1)
-            drawBoard(canvasLeft, 110, 145, node.state, cell=30, isGoalState=isGoal)
             
-            act = ARROW_MAP.get(node.action, 'Start') if node.action else 'Start'
-            par = f"Parent: [{node.parentLabel}]" if node.parentLabel else "Parent: None"
-            details = (
-                f"Bước số: {idx}\n\n"
-                f"Tên Node: [{node.label}]\n"
-                f"Hành động để đạt tới: {act}\n"
-                f"Độ sâu (Depth): {node.depth}\n"
-                f"Cost/f: {node.cost}\n"
-                f"h: {node.h}, g: {node.g}\n"
-                f"{par}\n\n"
-            )
-            if isGoal:
-                details += "🎉 Đã tới đích!"
-            infoLbl.config(text=details)
+            if isMultiStart:
+                for j in range(len(self.multiStartStates)):
+                    c = canvases[j]
+                    c.delete('all')
+                    b_state = node.state[j]
+                    b_is_goal = (b_state == self.goalState)
+                    drawBoard(c, 15, 15, b_state, cell=30, isGoalState=b_is_goal)
+                    
+                act = ARROW_MAP.get(node.action, 'Start') if node.action else 'Start'
+                details = (
+                    f"Bước số: {idx}\n\n"
+                    f"Hành động chung: {act}\n"
+                    f"Độ sâu tổng: {node.depth}\n"
+                    f"Tổng h(n): {node.cost}\n"
+                )
+                if isGoal:
+                    details += "\n🎉 Tất cả bản đồ đã đạt Goal!"
+                infoLbl.config(text=details)
+            else:
+                canvasLeft.delete('all')
+                drawBoard(canvasLeft, 110, 145, node.state, cell=30, isGoalState=isGoal)
+                
+                act = ARROW_MAP.get(node.action, 'Start') if node.action else 'Start'
+                par = f"Parent: [{node.parentLabel}]" if node.parentLabel else "Parent: None"
+                details = (
+                    f"Bước số: {idx}\n\n"
+                    f"Tên Node: [{node.label}]\n"
+                    f"Hành động để đạt tới: {act}\n"
+                    f"Độ sâu (Depth): {node.depth}\n"
+                    f"Cost/f: {node.cost}\n"
+                    f"h: {node.h}, g: {node.g}\n"
+                    f"{par}\n\n"
+                )
+                if isGoal:
+                    details += "🎉 Đã tới đích!"
+                infoLbl.config(text=details)
 
         def goPrevPath():
             if currentIdx[0] > 0:
@@ -1792,8 +2516,8 @@ class Main8PuzzleApp:
 
         btnFrame = tk.Frame(rightPane, bg=BG)
         btnFrame.pack(pady=10)
-        tk.Button(btnFrame, text="◀ Trước", command=goPrevPath, width=10, bg=PANEL).pack(side='left', padx=10)
-        tk.Button(btnFrame, text="Tiếp ▶", command=goNextPath, width=10, bg=PANEL).pack(side='left', padx=10)
+        tk.Button(btnFrame, text="◀ Trước", command=goPrevPath, width=10, bg=PANEL).pack(side='left', padx=5)
+        tk.Button(btnFrame, text="Tiếp ▶", command=goNextPath, width=10, bg=PANEL).pack(side='left', padx=5)
 
         drawStep(0)
 
@@ -1802,6 +2526,10 @@ class Main8PuzzleApp:
         idx = max(0, min(idx, len(self.steps) - 1))
         self.idx = idx
         step = self.steps[idx]
+        
+        if self.currentGroupName == 'Multi Start State':
+            self._renderMultiStart(step)
+            return
         
         # Determine specific frontier details
         if 'BFS' in self.currentAlgoName:
@@ -1847,12 +2575,13 @@ class Main8PuzzleApp:
 
         # Current Node
         self.curCanvas.delete('all')
+        known = getattr(step, 'known_positions', None)
         if step.currentNode:
             if isinstance(step.currentNode, list):
                 if len(step.currentNode) > 0:
                     n = step.currentNode[0]
                     isGoal = any(x.state == self.goalState for x in step.currentNode)
-                    drawBoard(self.curCanvas, 10, 10, n.state, cell=43, isGoalState=isGoal)
+                    drawBoard(self.curCanvas, 10, 10, n.state, cell=43, isGoalState=isGoal, knownCells=known)
                     self.curLabel.config(text=f'Beam: {len(step.currentNode)} Nodes')
                     self.curAction.config(text=f'Trạng thái: Đang xét chùm')
                     self.curCost.config(text='')
@@ -1866,8 +2595,24 @@ class Main8PuzzleApp:
                     self.curParent.config(text='')
             else:
                 n = step.currentNode
-                isGoal = (n.state == self.goalState)
-                drawBoard(self.curCanvas, 10, 10, n.state, cell=43, isGoalState=isGoal)
+                # Belief State rendering
+                if n.state and isinstance(n.state[0], tuple) and isinstance(n.state[0][0], tuple):
+                    bs = n.state
+                    self.curCanvas.config(width=20 + len(bs) * 110, height=130)
+                    for i, s in enumerate(bs):
+                        isGoal = False
+                        if hasattr(self, 'currentGoalStates'):
+                            isGoal = s in self.currentGoalStates
+                        drawBoard(self.curCanvas, 10 + i * 110, 10, s, cell=33, isGoalState=isGoal, knownCells=known)
+                else:
+                    self.curCanvas.config(width=150, height=150)
+                    isGoal = False
+                    if hasattr(self, 'currentGoalStates'):
+                        isGoal = n.state in self.currentGoalStates
+                    else:
+                        isGoal = (n.state == self.goalState)
+                    drawBoard(self.curCanvas, 10, 10, n.state, cell=43, isGoalState=isGoal, knownCells=known)
+                    
                 self.curLabel.config(text=f'Node [{n.label}]')
                 self.curAction.config(text=f'Action: {ARROW_MAP.get(n.action, "Start")}' if n.action else 'Action: Start')
                 if 'UCS' in self.currentAlgoName:
@@ -1893,7 +2638,8 @@ class Main8PuzzleApp:
     def _drawFrontier(self, step):
         c = self.frCanvas
         c.delete('all')
-        colW = 160
+        isBeliefStateEnv = self.currentAlgoName in ['Searching with no observation', 'Searching for partially observable problems']
+        colW = 280 if isBeliefStateEnv else 160
         itemH = 104
         padX = 10
         padY = 8
@@ -1931,6 +2677,7 @@ class Main8PuzzleApp:
 
         nFrontier = len(step.frontier)
         showNext = step.phase in ('init', 'new_limit', 'expand', 'cutoff') and nFrontier > 0
+        known = getattr(step, 'known_positions', None)
 
         nextCurrentNodeLabels = set()
         if self.idx < len(self.steps) - 1:
@@ -1960,6 +2707,9 @@ class Main8PuzzleApp:
             if showNext and not isGhost and (node.label in nextCurrentNodeLabels):
                 isNext = True
 
+            isBeliefState = node.state and isinstance(node.state[0], tuple) and isinstance(node.state[0][0], tuple)
+            draw_cell = 14 if isBeliefState else CELL_SIZE
+
             if isGhost:
                 c.create_rectangle(x0 - 3, y0 - 3, x0 + colW - 10, y0 + itemH - 4, fill=TILE_BLANK, outline=GRAY, width=1, dash=(4, 4))
             elif isNext:
@@ -1969,9 +2719,19 @@ class Main8PuzzleApp:
             elif isGoal:
                 c.create_rectangle(x0 - 3, y0 - 3, x0 + colW - 10, y0 + itemH - 4, fill='#e6ffec', outline=GREEN, width=1)
 
-            drawBoard(c, x0 + 2, y0 + 4, node.state, cell=CELL_SIZE, highlight='ghost' if isGhost else None, isGoalState=isGoal if not isGhost else False)
-
-            tx = x0 + 3 * CELL_SIZE + 8
+            if isBeliefState:
+                bs = node.state
+                spacing = 3 * draw_cell + 6
+                for j, s in enumerate(bs):
+                    is_goal = False
+                    if hasattr(self, 'currentGoalStates'):
+                        is_goal = s in self.currentGoalStates
+                    drawBoard(c, x0 + 2 + j * spacing, y0 + 4, s, cell=draw_cell, highlight='ghost' if isGhost else None, isGoalState=is_goal if not isGhost else False, knownCells=known)
+                tx = x0 + len(bs) * spacing + 6
+            else:
+                drawBoard(c, x0 + 2, y0 + 4, node.state, cell=draw_cell, highlight='ghost' if isGhost else None, isGoalState=isGoal if not isGhost else False, knownCells=known)
+                tx = x0 + 3 * draw_cell + 8
+                
             ty = y0 + 4
             ghostClr = GRAY
 
@@ -2039,6 +2799,8 @@ class Main8PuzzleApp:
             exploredList = self.exploredMaster[:step.exploredCount]
         else:
             exploredList = step.explored
+            
+        known = getattr(step, 'known_positions', None)
 
         for i, node in enumerate(reversed(exploredList)):
             y0 = padY + i * itemH
@@ -2047,9 +2809,22 @@ class Main8PuzzleApp:
             if i > 0:
                 c.create_line(padX, y0 - 4, 260, y0 - 4, fill=BORDER, width=1)
 
-            drawBoard(c, padX, y0 + 4, node.state, cell=CELL_SIZE, highlight='explored', isGoalState=isGoal)
+            isBeliefState = node.state and isinstance(node.state[0], tuple) and isinstance(node.state[0][0], tuple)
+            draw_cell = 14 if isBeliefState else CELL_SIZE
 
-            tx = padX + 3 * CELL_SIZE + 8
+            if isBeliefState:
+                bs = node.state
+                spacing = 3 * draw_cell + 6
+                for j, s in enumerate(bs):
+                    is_goal = False
+                    if hasattr(self, 'currentGoalStates'):
+                        is_goal = s in self.currentGoalStates
+                    drawBoard(c, padX + j * spacing, y0 + 4, s, cell=draw_cell, highlight='explored', isGoalState=is_goal, knownCells=known)
+                tx = padX + len(bs) * spacing + 6
+            else:
+                drawBoard(c, padX, y0 + 4, node.state, cell=draw_cell, highlight='explored', isGoalState=isGoal, knownCells=known)
+                tx = padX + 3 * draw_cell + 8
+
             ty = y0 + 4
 
             c.create_text(tx, ty, text=f'[{node.label}]', anchor='nw', fill=BLACK, font=('Segoe UI', 8, 'bold'))

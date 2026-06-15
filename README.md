@@ -17,3 +17,9 @@
     - RRHC (Random Restart Hill Climbing)
 - **Nhóm Tìm kiếm Local Beam Search:**
     - LBS (Local Beam Search)
+- **Nhóm Tìm kiếm Multi Start State:**
+    - Multi-Start A* Search
+- **Nhóm Tìm kiếm trong Môi trường Phức tạp (Searching in complex environments):**
+    - AND-OR search
+    - Searching with no observation
+    - Searching for partially observable problems
