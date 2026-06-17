@@ -23,3 +23,8 @@
     - AND-OR search
     - Searching with no observation
     - Searching for partially observable problems
+- **Nhóm Thuật toán Constraint Satisfaction Problems (CSP):**
+    - Backtracking search
+    - Forward Checking
+    - Arc Consistency
+    - Min-Conflicts

@@ -51,12 +51,74 @@ def generateLabel(idx: int) -> str:
     idx -= 26
     return chr(65 + idx % 26) + str(idx // 26)
 
+def drawCSPGraph(canvas, x, y, assignment, cell=CELL_SIZE):
+    scale = (cell * 3) / 200.0
+    nodes = {
+        'WA': (40, 70), 'NT': (100, 40), 'SA': (100, 100),
+        'Q': (160, 50), 'NSW': (160, 100), 'V': (140, 140), 'T': (160, 170)
+    }
+    edges = [
+        ('WA', 'NT'), ('WA', 'SA'), ('NT', 'SA'), ('NT', 'Q'),
+        ('SA', 'Q'), ('SA', 'NSW'), ('SA', 'V'), ('Q', 'NSW'), ('NSW', 'V')
+    ]
+    color_map = {'đỏ': '#cf222e', 'xanh lá': '#1a7f37', 'xanh dương': '#0969da', 'none': '#eaeef2'}
+    
+    assign_dict = dict(assignment) if isinstance(assignment, tuple) else {}
+    
+    for u, v in edges:
+        ux, uy = nodes[u]
+        vx, vy = nodes[v]
+        canvas.create_line(x + ux * scale, y + uy * scale, x + vx * scale, y + vy * scale, fill='#d0d7de', width=2)
+        
+    r = 15 * scale
+    for node_name, (nx, ny) in nodes.items():
+        cx, cy = x + nx * scale, y + ny * scale
+        color_name = assign_dict.get(node_name, 'none')
+        fill_color = color_map.get(color_name, '#eaeef2')
+        canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill=fill_color, outline='#57606a')
+        
+        if scale > 0.5:
+            text_color = '#ffffff' if fill_color != '#eaeef2' else '#24292f'
+            canvas.create_text(cx, cy, text=node_name, fill=text_color, font=('Segoe UI', max(6, int(8*scale)), 'bold'))
+
+def drawCSPArc(canvas, x, y, domains, cell=CELL_SIZE):
+    width = 3 * cell
+    row_h = width / 3.0
+    domains_dict = dict(domains) if isinstance(domains, tuple) else {}
+    for i, var in enumerate(['X', 'Y', 'Z']):
+        dom = domains_dict.get(var, tuple())
+        cy = y + i * row_h
+        canvas.create_text(x + 10, cy + row_h/2, text=f"{var}:", font=('Segoe UI', max(10, int(cell*0.2)), 'bold'), anchor='w')
+        
+        val_x = x + max(50, cell * 0.5)
+        box_s = cell * 0.3
+        
+        for val in [1, 2, 3]:
+            if val in dom:
+                fill_c = '#0969da'
+                txt_c = '#ffffff'
+            else:
+                fill_c = '#eaeef2'
+                txt_c = '#d0d7de'
+            
+            canvas.create_rectangle(val_x, cy + (row_h - box_s)/2, val_x + box_s, cy + (row_h + box_s)/2, fill=fill_c, outline='#57606a')
+            canvas.create_text(val_x + box_s/2, cy + row_h/2, text=str(val), fill=txt_c, font=('Segoe UI', max(8, int(box_s*0.5)), 'bold'))
+            val_x += box_s + 10
+
 def drawBoard(canvas, x, y, state, cell=CELL_SIZE, highlight=None, newCells=None, isGoalState=False, knownCells=None):
     """Draws a 3x3 puzzle board on the canvas."""
     # Handle Belief State (tuple of states): just draw the first state for the UI
     if state and isinstance(state[0], tuple) and isinstance(state[0][0], tuple):
         state = state[0]
         
+    if state and isinstance(state, tuple) and isinstance(state[0], str):
+        if state[0] in ['CSP_Graph', 'CSP_Graph_FC']:
+            drawCSPGraph(canvas, x, y, state[1], cell)
+            return
+        elif state[0] == 'CSP_Arc':
+            drawCSPArc(canvas, x, y, state[1], cell)
+            return
+            
     isGhost = (highlight == 'ghost')
     for r in range(3):
         for c in range(3):
@@ -1604,6 +1666,245 @@ class SearchEngine:
         steps.append(StepInfo('failure', None, [], list(exploredList), set(), descFail, known_positions=known_positions))
         return steps, exploredList
 
+    @staticmethod
+    def runBacktracking(initial: tuple, goal: tuple) -> tuple[list[StepInfo], list[NodeInfo]]:
+        variables = ['WA', 'NT', 'SA', 'Q', 'NSW', 'V', 'T']
+        domains = {v: ['đỏ', 'xanh lá', 'xanh dương'] for v in variables}
+        neighbors = {
+            'WA': ['NT', 'SA'], 'NT': ['WA', 'SA', 'Q'], 'SA': ['WA', 'NT', 'Q', 'NSW', 'V'],
+            'Q': ['NT', 'SA', 'NSW'], 'NSW': ['Q', 'SA', 'V'], 'V': ['SA', 'NSW'], 'T': []
+        }
+        
+        steps, exploredList, labelIndex = [], [], [0]
+        
+        def createNode(assignment, action=None, depth=0, parentNode=None):
+            parentLabel = parentNode.label if parentNode else None
+            state = ('CSP_Graph', tuple((k, assignment[k]) for k in variables if k in assignment))
+            n = NodeInfo(state, action, depth, 0, parentLabel, generateLabel(labelIndex[0]), parent=parentNode)
+            labelIndex[0] += 1
+            return n
+
+        def is_consistent(var, value, assignment):
+            for neighbor in neighbors[var]:
+                if neighbor in assignment and assignment[neighbor] == value:
+                    return False
+            return True
+
+        startNode = createNode({})
+        steps.append(StepInfo('init', startNode, [], [], {startNode.label}, "Khởi tạo Backtracking: Assignment = {}"))
+        
+        def backtrack(assignment, parentNode):
+            if len(assignment) == len(variables): return parentNode
+            
+            unassigned = [v for v in variables if v not in assignment]
+            var = unassigned[0]
+            
+            for value in domains[var]:
+                descExp = f"Chọn biến {var}, thử gán {var} = {value}"
+                
+                if is_consistent(var, value, assignment):
+                    new_assignment = assignment.copy()
+                    new_assignment[var] = value
+                    child = createNode(new_assignment, f"{var}={value}", parentNode.depth + 1, parentNode)
+                    exploredList.append(child)
+                    steps.append(StepInfo('expand', child, [], list(exploredList), {child.label}, descExp + " -> Hợp lệ"))
+                    
+                    result = backtrack(new_assignment, child)
+                    if result: return result
+                else:
+                    temp_assignment = assignment.copy()
+                    temp_assignment[var] = value
+                    child = createNode(temp_assignment, f"{var}={value}", parentNode.depth + 1, parentNode)
+                    steps.append(StepInfo('expand', child, [], list(exploredList), {child.label}, descExp + " -> Vi phạm ràng buộc (Lùi lại)"))
+            return None
+            
+        finalNode = backtrack({}, startNode)
+        if finalNode: steps.append(StepInfo('found', finalNode, [], list(exploredList), set(), "Tìm thấy cấu hình hợp lệ thỏa mãn tất cả ràng buộc!"))
+        else: steps.append(StepInfo('failure', None, [], list(exploredList), set(), "Thất bại: Không có giải pháp."))
+        return steps, exploredList
+
+    @staticmethod
+    def runForwardChecking(initial: tuple, goal: tuple) -> tuple[list[StepInfo], list[NodeInfo]]:
+        variables = ['WA', 'NT', 'SA', 'Q', 'NSW', 'V', 'T']
+        colors = ['đỏ', 'xanh lá', 'xanh dương']
+        neighbors = {
+            'WA': ['NT', 'SA'], 'NT': ['WA', 'SA', 'Q'], 'SA': ['WA', 'NT', 'Q', 'NSW', 'V'],
+            'Q': ['NT', 'SA', 'NSW'], 'NSW': ['Q', 'SA', 'V'], 'V': ['SA', 'NSW'], 'T': []
+        }
+        
+        steps, exploredList, labelIndex = [], [], [0]
+        
+        def createNode(assignment, domains, action=None, depth=0, parentNode=None):
+            parentLabel = parentNode.label if parentNode else None
+            state = ('CSP_Graph_FC', tuple((k, assignment[k]) for k in variables if k in assignment), tuple((k, tuple(domains[k])) for k in variables))
+            n = NodeInfo(state, action, depth, 0, parentLabel, generateLabel(labelIndex[0]), parent=parentNode)
+            labelIndex[0] += 1
+            return n
+
+        startNode = createNode({}, {v: list(colors) for v in variables})
+        steps.append(StepInfo('init', startNode, [], [], {startNode.label}, "Khởi tạo Forward Checking: Assignment = {}"))
+        
+        def backtrack_fc(assignment, domains, parentNode):
+            if len(assignment) == len(variables): return parentNode
+            
+            unassigned = [v for v in variables if v not in assignment]
+            var = unassigned[0]
+            
+            for value in domains[var]:
+                descExp = f"Chọn {var}, gán = {value}."
+                new_domains = {k: list(v) for k, v in domains.items()}
+                new_assignment = assignment.copy()
+                new_assignment[var] = value
+                
+                valid = True
+                pruned = []
+                for neighbor in neighbors[var]:
+                    if neighbor not in new_assignment:
+                        if value in new_domains[neighbor]:
+                            new_domains[neighbor].remove(value)
+                            pruned.append(f"{neighbor} loại {value}")
+                            if not new_domains[neighbor]: valid = False
+                
+                if pruned: descExp += "\n👉 FC: " + ", ".join(pruned)
+                child = createNode(new_assignment, new_domains, f"{var}={value}", parentNode.depth + 1, parentNode)
+                exploredList.append(child)
+                
+                if valid:
+                    steps.append(StepInfo('expand', child, [], list(exploredList), {child.label}, descExp + " -> Miền giá trị hợp lệ."))
+                    result = backtrack_fc(new_assignment, new_domains, child)
+                    if result: return result
+                else:
+                    steps.append(StepInfo('expand', child, [], list(exploredList), {child.label}, descExp + " -> FC phát hiện miền rỗng (Lùi lại)."))
+            return None
+            
+        finalNode = backtrack_fc({}, {v: list(colors) for v in variables}, startNode)
+        if finalNode: steps.append(StepInfo('found', finalNode, [], list(exploredList), set(), "Tìm thấy cấu hình hợp lệ thỏa mãn tất cả ràng buộc!"))
+        else: steps.append(StepInfo('failure', None, [], list(exploredList), set(), "Thất bại: Không có giải pháp."))
+        return steps, exploredList
+
+    @staticmethod
+    def runMinConflicts(initial: tuple, goal: tuple) -> tuple[list[StepInfo], list[NodeInfo]]:
+        variables = ['WA', 'NT', 'SA', 'Q', 'NSW', 'V', 'T']
+        colors = ['đỏ', 'xanh lá', 'xanh dương']
+        neighbors = {
+            'WA': ['NT', 'SA'], 'NT': ['WA', 'SA', 'Q'], 'SA': ['WA', 'NT', 'Q', 'NSW', 'V'],
+            'Q': ['NT', 'SA', 'NSW'], 'NSW': ['Q', 'SA', 'V'], 'V': ['SA', 'NSW'], 'T': []
+        }
+        
+        steps, exploredList, labelIndex = [], [], [0]
+        
+        def createNode(assignment, action=None, depth=0, parentNode=None):
+            parentLabel = parentNode.label if parentNode else None
+            state = ('CSP_Graph', tuple((k, assignment[k]) for k in variables))
+            n = NodeInfo(state, action, depth, 0, parentLabel, generateLabel(labelIndex[0]), parent=parentNode)
+            labelIndex[0] += 1
+            return n
+
+        def conflicts(var, val, assignment):
+            return sum(1 for neighbor in neighbors[var] if assignment[neighbor] == val)
+            
+        assignment = {v: random.choice(colors) for v in variables}
+        currentNode = createNode(assignment)
+        steps.append(StepInfo('init', currentNode, [], [], {currentNode.label}, "Khởi tạo Min Conflicts:\n👉 Gán ngẫu nhiên trạng thái ban đầu."))
+        
+        max_steps = 100
+        for i in range(max_steps):
+            exploredList.append(currentNode)
+            conflicted_vars = [v for v in variables if conflicts(v, assignment[v], assignment) > 0]
+            
+            if not conflicted_vars:
+                steps.append(StepInfo('found', currentNode, [], list(exploredList), set(), "Tìm thấy trạng thái đích: Số lượng xung đột = 0!"))
+                return steps, exploredList
+                
+            var = random.choice(conflicted_vars)
+            
+            min_conflicts = float('inf')
+            best_values = []
+            for val in colors:
+                c = conflicts(var, val, assignment)
+                if c < min_conflicts:
+                    min_conflicts, best_values = c, [val]
+                elif c == min_conflicts:
+                    best_values.append(val)
+                    
+            new_val = random.choice(best_values)
+            assignment[var] = new_val
+            
+            nextNode = createNode(assignment, f"{var}={new_val}", currentNode.depth + 1, currentNode)
+            steps.append(StepInfo('expand', nextNode, [], list(exploredList), {nextNode.label}, f"Bước {i+1}:\n👉 Chọn ngẫu nhiên biến xung đột: {var}\n👉 Đổi thành màu ít xung đột nhất ({new_val}) với {min_conflicts} xung đột."))
+            currentNode = nextNode
+            
+        steps.append(StepInfo('failure', currentNode, [], list(exploredList), set(), f"Thất bại: Đã đạt số bước tối đa ({max_steps})."))
+        return steps, exploredList
+
+    @staticmethod
+    def runAC3(initial: tuple, goal: tuple) -> tuple[list[StepInfo], list[NodeInfo]]:
+        variables = ['X', 'Y', 'Z']
+        domains = {'X': [1,2,3], 'Y': [1,2,3], 'Z': [2,3]}
+        arcs = [('X', 'Y'), ('Y', 'X'), ('Y', 'Z'), ('Z', 'Y')]
+        
+        def satisfies(x, val_x, y, val_y):
+            if x == 'X' and y == 'Y': return val_x < val_y
+            if x == 'Y' and y == 'X': return val_y < val_x
+            if x == 'Y' and y == 'Z': return val_x < val_y
+            if x == 'Z' and y == 'Y': return val_y < val_x
+            return True
+            
+        steps, exploredList, labelIndex = [], [], [0]
+        
+        def createNode(doms, action=None, depth=0, parentNode=None):
+            parentLabel = parentNode.label if parentNode else None
+            state = ('CSP_Arc', tuple((k, tuple(doms[k])) for k in variables))
+            n = NodeInfo(state, action, depth, 0, parentLabel, generateLabel(labelIndex[0]), parent=parentNode)
+            labelIndex[0] += 1
+            return n
+
+        currentNode = createNode(domains)
+        queue = deque(arcs)
+        
+        descInit = f"Khởi tạo AC-3:\n👉 Q = {', '.join([f'{a}{b}' for a, b in queue])}\n👉 D(X)={{1,2,3}}, D(Y)={{1,2,3}}, D(Z)={{2,3}}"
+        steps.append(StepInfo('init', currentNode, [], [], {currentNode.label}, descInit))
+        
+        while queue:
+            exploredList.append(currentNode)
+            (xi, xj) = queue.popleft()
+            
+            revised = False
+            new_doms = {k: list(v) for k, v in domains.items()}
+            pruned_vals = []
+            
+            for x_val in list(new_doms[xi]):
+                if not any(satisfies(xi, x_val, xj, y_val) for y_val in new_doms[xj]):
+                    new_doms[xi].remove(x_val)
+                    pruned_vals.append(x_val)
+                    revised = True
+                    
+            domains = new_doms
+            nextNode = createNode(domains, f"Xét {xi}{xj}", currentNode.depth + 1, currentNode)
+            
+            descExp = f"Xét cung {xi}{xj}:\n"
+            if revised:
+                descExp += f"👉 Loại bỏ {pruned_vals} khỏi D({xi}) do không có giá trị D({xj}) tương ứng thỏa mãn.\n"
+                
+                # Bám sát tài liệu: Thuật toán Naive AC-3 (thêm TẤT CẢ các cung còn thiếu vào hàng đợi)
+                for arc in arcs:
+                    if arc not in queue:
+                        queue.append(arc)
+                        descExp += f"👉 Thêm cung {arc[0]}{arc[1]} vào Q.\n"
+            else:
+                descExp += f"👉 Thỏa mãn, không có giá trị nào bị loại khỏi D({xi}).\n"
+                
+            descExp += f"👉 Q hiện tại: {{{', '.join([f'{a}{b}' for a, b in queue])}}}"
+            steps.append(StepInfo('expand', nextNode, [], list(exploredList), {nextNode.label}, descExp))
+            currentNode = nextNode
+            
+            if not domains[xi]:
+                steps.append(StepInfo('failure', currentNode, [], list(exploredList), set(), f"Thất bại: D({xi}) rỗng."))
+                return steps, exploredList
+                
+        steps.append(StepInfo('found', currentNode, [], list(exploredList), set(), "Thành công: Thuật toán AC-3 hoàn tất, tất cả các cung đã nhất quán!"))
+        return steps, exploredList
+
 # ══════════════════════════════════════════════════
 # 5. GIAO DIỆN & ỨNG DỤNG (UI/UX & APPLICATION)
 # ══════════════════════════════════════════════════
@@ -1632,7 +1933,11 @@ class Main8PuzzleApp:
             'AND-OR search': SearchEngine.runAndOrSearch,
             'Searching with no observation': SearchEngine.runSensorlessSearch,
             'Searching for partially observable problems': SearchEngine.runPartiallyObservableSearch,
-            'Multi-Start Greedy Search': None
+            'Multi-Start Greedy Search': None,
+            'Backtracking': SearchEngine.runBacktracking,
+            'Forward Checking': SearchEngine.runForwardChecking,
+            'Min Conflicts': SearchEngine.runMinConflicts,
+            'AC-3': SearchEngine.runAC3
         }
         self.algoGroups = {
             'Uninformed Search': [
@@ -1662,6 +1967,12 @@ class Main8PuzzleApp:
             ],
             'Multi Start State': [
                 'Multi-Start Greedy Search'
+            ],
+            'Constraint satisfaction problems': [
+                'Backtracking',
+                'Forward Checking',
+                'Min Conflicts',
+                'AC-3'
             ]
         }
         self.currentGroupName = 'Uninformed Search'
@@ -1681,6 +1992,18 @@ class Main8PuzzleApp:
         if algoName == 'Multi-Start Greedy Search':
             self._loadMultiStartSearch()
             return
+            
+        if algoName in ['Backtracking', 'Forward Checking', 'Min Conflicts']:
+            self.startState = ('CSP_Graph', ())
+            self.goalState = ('CSP_Graph', ())
+        elif algoName == 'AC-3':
+            self.startState = ('CSP_Arc', ())
+            self.goalState = ('CSP_Arc', ())
+        else:
+            # We revert back to initial default if switching from CSP back to normal
+            if isinstance(self.startState, tuple) and isinstance(self.startState[0], str):
+                self.startState = INITIAL_STATE
+                self.goalState = GOAL_STATE
             
         algoFunc = self.algorithms[algoName]
         self.steps, self.exploredMaster = algoFunc(self.startState, self.goalState)
@@ -1714,6 +2037,10 @@ class Main8PuzzleApp:
     def _openCustomStatesDialog(self) -> None:
         """Opens a popup dialog to enter custom Start and Goal states."""
         self._stopAuto()
+        
+        if self.currentAlgoName in ['Backtracking', 'Forward Checking', 'Min Conflicts', 'AC-3']:
+            messagebox.showinfo("Thông báo", "Không hỗ trợ tuỳ chỉnh trạng thái cho nhóm CSP.")
+            return
         
         dialog = tk.Toplevel(self.root)
         dialog.title("Nhập Start & Goal")
@@ -2006,11 +2333,30 @@ class Main8PuzzleApp:
         self._render(0)
 
     def _updateLayoutForGroup(self, groupName: str) -> None:
-        if groupName == 'Multi Start State':
+        if groupName == 'Constraint satisfaction problems':
             self.leftCol.pack_forget()
             self.frontierCol.pack_forget()
             self.exploredCol.pack_forget()
-            
+            if hasattr(self, 'multiStartCol'):
+                self.multiStartCol.pack_forget()
+            if hasattr(self, 'multiStartCtrlFrame'):
+                self.multiStartCtrlFrame.pack_forget()
+            if hasattr(self, 'btnCustomStates'):
+                self.btnCustomStates.grid_forget()
+            if hasattr(self, 'banner'):
+                self.banner.pack_forget()
+                
+            self.cspCol.pack(side='left', fill='both', expand=True, pady=(0, 8))
+            self._loadAlgorithm(self.currentAlgoName)
+        elif groupName == 'Multi Start State':
+            self.leftCol.pack_forget()
+            self.frontierCol.pack_forget()
+            self.exploredCol.pack_forget()
+            if hasattr(self, 'cspCol'):
+                self.cspCol.pack_forget()
+            if hasattr(self, 'banner'):
+                self.banner.pack_forget()
+                
             if hasattr(self, 'btnCustomStates'):
                 self.btnCustomStates.grid_forget()
             if hasattr(self, 'multiStartCtrlFrame'):
@@ -2033,6 +2379,8 @@ class Main8PuzzleApp:
                 self.multiStartCol.pack_forget()
             if hasattr(self, 'multiStartCtrlFrame'):
                 self.multiStartCtrlFrame.pack_forget()
+            if hasattr(self, 'cspCol'):
+                self.cspCol.pack_forget()
                 
             if hasattr(self, 'leftCol'):
                 self.leftCol.pack(side='left', fill='y', padx=(0, 8))
@@ -2043,6 +2391,9 @@ class Main8PuzzleApp:
                 
             if hasattr(self, 'btnCustomStates'):
                 self.btnCustomStates.grid(row=0, column=6, padx=8)
+                
+            if hasattr(self, 'banner'):
+                self.banner.pack(side='bottom', fill='x', padx=10, pady=(0, 10))
                 
             self._loadAlgorithm(self.currentAlgoName)
 
@@ -2257,6 +2608,38 @@ class Main8PuzzleApp:
 
         # Multi Start MAIN Column (Hidden initially)
         self.multiStartCol = tk.Frame(body, bg=BG)
+        
+        # CSP Column
+        self.cspCol = tk.Frame(body, bg=BG)
+        self._buildCspPanel(self.cspCol)
+
+    def _buildCspPanel(self, parent):
+        self.cspLeftFrame = tk.Frame(parent, bg=BG, highlightthickness=1, highlightbackground=BORDER)
+        self.cspLeftFrame.pack(side='left', fill='both', expand=True, padx=(0, 8))
+        tk.Label(self.cspLeftFrame, text="Đồ thị / Bài toán Cung", font=('Segoe UI', 10, 'bold'), bg=PANEL, fg=BLACK).pack(fill='x', ipady=4)
+        tk.Frame(self.cspLeftFrame, bg=BORDER, height=1).pack(fill='x')
+        self.cspCanvas = tk.Canvas(self.cspLeftFrame, bg=BG, highlightthickness=0)
+        self.cspCanvas.pack(fill='both', expand=True, padx=10, pady=10)
+
+        self.cspRightFrame = tk.Frame(parent, bg=PANEL, highlightthickness=1, highlightbackground=BORDER, width=320)
+        self.cspRightFrame.pack(side='right', fill='y')
+        self.cspRightFrame.pack_propagate(False)
+        tk.Label(self.cspRightFrame, text="Thông tin chi tiết", font=('Segoe UI', 10, 'bold'), bg=PANEL, fg=BLACK).pack(fill='x', ipady=4)
+        tk.Frame(self.cspRightFrame, bg=BORDER, height=1).pack(fill='x')
+        
+        self.cspDescLbl = tk.Label(self.cspRightFrame, text="", font=('Segoe UI', 10), bg=PANEL, fg=BLACK, justify='left', anchor='nw', wraplength=290)
+        self.cspDescLbl.pack(fill='x', padx=10, pady=10)
+        
+        tk.Frame(self.cspRightFrame, bg=BORDER, height=1).pack(fill='x', padx=10, pady=5)
+        
+        tk.Label(self.cspRightFrame, text="Assignments / Arc:", font=('Segoe UI', 9, 'bold'), bg=PANEL, fg=GRAY, anchor='w').pack(fill='x', padx=10)
+        self.cspAssignmentLbl = tk.Label(self.cspRightFrame, text="", font=('Consolas', 9), bg=PANEL, fg=PURPLE, justify='left', anchor='nw', wraplength=290)
+        self.cspAssignmentLbl.pack(fill='x', padx=10, pady=5)
+        
+        self.cspDomainTitleLbl = tk.Label(self.cspRightFrame, text="Domains:", font=('Segoe UI', 9, 'bold'), bg=PANEL, fg=GRAY, anchor='w')
+        self.cspDomainTitleLbl.pack(fill='x', padx=10)
+        self.cspDomainLbl = tk.Label(self.cspRightFrame, text="", font=('Consolas', 9), bg=PANEL, fg=ACCENT, justify='left', anchor='nw', wraplength=290)
+        self.cspDomainLbl.pack(fill='x', padx=10, pady=5)
 
     def _panel(self, parent, title):
         f = tk.Frame(parent, bg=BG, highlightthickness=1, highlightbackground=BORDER)
@@ -2521,7 +2904,6 @@ class Main8PuzzleApp:
 
         drawStep(0)
 
-    # ─── Render Logic ───────────────────────────────────
     def _render(self, idx):
         idx = max(0, min(idx, len(self.steps) - 1))
         self.idx = idx
@@ -2530,7 +2912,52 @@ class Main8PuzzleApp:
         if self.currentGroupName == 'Multi Start State':
             self._renderMultiStart(step)
             return
+            
+        if self.currentGroupName == 'Constraint satisfaction problems':
+            self._renderCSP(step)
+            return
         
+    def _renderCSP(self, step):
+        self.stepLbl.config(text=f'Bước {self.idx} / {len(self.steps) - 1}')
+        self.cspDescLbl.config(text=step.desc)
+        
+        node = step.currentNode
+        self.cspCanvas.delete('all')
+        
+        if node and node.state:
+            state_type = node.state[0]
+            if state_type in ['CSP_Graph', 'CSP_Graph_FC']:
+                # The scale factor is (cell * 3) / 200, so cell=150 scales by 450/200 = 2.25
+                drawCSPGraph(self.cspCanvas, 30, 30, node.state[1], cell=150)
+                
+                assign_text = ""
+                for k, v in node.state[1]:
+                    assign_text += f"• {k}: {v}\n"
+                self.cspAssignmentLbl.config(text=assign_text if assign_text else "Chưa gán.")
+                
+                if state_type == 'CSP_Graph_FC':
+                    self.cspDomainTitleLbl.pack(fill='x', padx=10)
+                    self.cspDomainLbl.pack(fill='x', padx=10, pady=5)
+                    dom_text = ""
+                    for k, v in node.state[2]:
+                        dom_text += f"• {k}: {', '.join(v)}\n"
+                    self.cspDomainLbl.config(text=dom_text)
+                else:
+                    self.cspDomainTitleLbl.pack_forget()
+                    self.cspDomainLbl.pack_forget()
+                    
+            elif state_type == 'CSP_Arc':
+                drawCSPArc(self.cspCanvas, 30, 30, node.state[1], cell=150)
+                
+                self.cspAssignmentLbl.config(text="Kiểm tra tính nhất quán cung.")
+                self.cspDomainTitleLbl.pack(fill='x', padx=10)
+                self.cspDomainLbl.pack(fill='x', padx=10, pady=5)
+                
+                dom_text = ""
+                for k, v in node.state[1]:
+                    dom_text += f"• D({k}): {{{', '.join(map(str, v))}}}\n"
+                self.cspDomainLbl.config(text=dom_text)
+
         # Determine specific frontier details
         if 'BFS' in self.currentAlgoName:
             self.frontierTitleVar.set('Frontier — Queue (FIFO)')
@@ -2561,7 +2988,7 @@ class Main8PuzzleApp:
         self.phaseIcon.config(text=icon, fg=pc)
         self.phaseBadge.config(text=badgeTxt, bg=pc, fg=fc)
         self.descLbl.config(text=step.desc)
-        self.stepLbl.config(text=f'Bước {idx} / {len(self.steps) - 1}')
+        self.stepLbl.config(text=f'Bước {self.idx} / {len(self.steps) - 1}')
 
         # Draw newly generated children in detail canvas
         self.detailCanvas.delete('all')
